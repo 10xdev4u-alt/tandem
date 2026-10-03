@@ -1,0 +1,53 @@
+# Operating agreement. Local only, never committed.
+WORKFLOW.md
+
+# Go
+/tandemd
+*.test
+*.out
+coverage.txt
+coverage.html
+vendor/
+
+# Node
+node_modules/
+.turbo/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# Runtime artifacts. Databases are generated, never committed.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+.tandem/
+/tmp-data/
+*.log
+
+# Embedded Postgres data dirs
+pgdata/
+.postgres/
+
+# Secrets. Never commit, never log.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Reports and scratch. The plan HTML is a draft artifact, not source.
+*.report.html
+/tandem-plan.html
+/scratch/
+/notes/
