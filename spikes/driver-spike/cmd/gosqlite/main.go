@@ -182,9 +182,26 @@ func main() {
 	var beforePartial int
 	must(partial.sc.QueryRowContext(ctx, `SELECT count(*) FROM accounts`).Scan(&beforePartial))
 
-	var partialErr error
+	// A non-nil error is not proof that a conflict was observed. ApplyChangeset
+	// can fail before SQLite applies anything, for example if the changeset
+	// buffer cannot be allocated, and the row count assertions would still pass.
+	// So record which conflict classes the handler actually sees and require a
+	// primary key conflict specifically.
+	var (
+		partialErr     error
+		observedConfl  []sqlite.ConflictType
+		sawConflictCls bool
+	)
 	partial.raw(func(c *sqlite.Conn) {
-		partialErr = c.ApplyChangeset(changeset)
+		partialErr = c.ApplyChangeset(changeset,
+			sqlite.WithConflictHandler(func(ct sqlite.ConflictType) sqlite.ConflictAction {
+				observedConfl = append(observedConfl, ct)
+				if ct == sqlite.ConflictConflict {
+					sawConflictCls = true
+				}
+				return sqlite.ChangesetAbort
+			}),
+		)
 	})
 
 	var afterPartial, maxID int
@@ -197,6 +214,8 @@ func main() {
 	fmt.Println()
 	fmt.Printf("partial-overlap apply (replica pre-seeded with %d of %d rows):\n", beforePartial, *rows)
 	check1("partial apply fails", partialErr != nil, fmt.Sprintf("err=%v", partialErr))
+	check1("conflict handler saw pk conflict", sawConflictCls,
+		fmt.Sprintf("classes=%v", observedConfl))
 	check1("partial apply wrote nothing", afterPartial == beforePartial,
 		fmt.Sprintf("rows %d -> %d", beforePartial, afterPartial))
 	check1("no new rows leaked", maxID <= beforePartial,

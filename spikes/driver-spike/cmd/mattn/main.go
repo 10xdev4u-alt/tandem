@@ -68,9 +68,11 @@ func main() {
 	//
 	// The check is "did the insert get rejected", so the error being non-nil is
 	// the enforcing case.
-	// The parent id below is never inserted into accounts, so an enforcing
-	// foreign key rejects the insert. Enforcement means the insert errored.
-	const orphanParent = 999999
+	// The parent id below must never exist in accounts, at any -rows value.
+	// Accounts are inserted with ids 1..rows, so a fixed id inside that range
+	// would start existing once -rows reached it, and the probe would then
+	// report a false "not enforced". Negative ids are never inserted.
+	const orphanParent = -1
 
 	reset := func(target execer) {
 		must(exec(target.ExecContext(ctx, `PRAGMA foreign_keys=ON`)))
