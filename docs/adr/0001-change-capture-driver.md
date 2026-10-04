@@ -47,8 +47,7 @@ Both columns are real output, not estimates.
 | `CGO_ENABLED=0` | builds a 3.4 MiB stub that fails at runtime | cross compiles and works |
 | transitive dependencies | 2 | libc, mathutil, memory, sqlite |
 
-Reproduce with `go run ./cmd/mattn -rows 100000` and
-`go run ./cmd/gosqlite -rows 100000`.
+Reproduce from the probe module directory, see the last section.
 
 Build times reproduced across two runs with the cache cleared before each, and
 agreed within 0.2 percent. An independent reviewer on different hardware saw
@@ -99,9 +98,20 @@ Measured properly, on a replica of the same sequence:
 The pragma enforces in all four. `database/sql` reuses the single idle connection
 across sequential operations, which is why pinned and unpinned agree.
 
-The advice survives even though the finding did not. Pragmas are per connection,
-so set them on every connection the daemon opens rather than once at startup. That
-is still correct. It is just not what we thought we had proved here.
+The probe now also demonstrates the per-connection property directly, by setting
+the pragma on one pinned connection and writing through a different one:
+
+```
+foreign key behaviour:
+  unpinned pool                 orphan rejected=true
+  pinned single connection      orphan rejected=true
+  pragma on conn A, write on B  orphan rejected=false
+```
+
+That third line is the one worth keeping. The pragma is per connection, so a
+daemon that sets it once at startup and then hands work to a pool has not turned
+foreign keys on, it has turned them on for whichever connection happened to run
+the pragma. Set them on every connection the daemon opens.
 
 ### The corruption bug is real and out of our reach
 
@@ -211,9 +221,17 @@ it.
 
 ## Reproducing this spike
 
+Both probes live in their own Go module, so run them from that directory.
+
 ```
+cd spikes/driver-spike
 go run ./cmd/mattn    -rows 100000
 go run ./cmd/gosqlite -rows 100000
 ```
 
+The gosqlite probe asserts nine conditions and exits non-zero if any of them
+fail. Pass `-rows 1` to see it fail on purpose, which is the quickest way to
+confirm the gate is wired rather than decorative.
+
 Both probes are committed and both are what produced every number above.
+

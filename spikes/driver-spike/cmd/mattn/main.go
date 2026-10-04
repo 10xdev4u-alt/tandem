@@ -68,6 +68,16 @@ func main() {
 	//
 	// The check is "did the insert get rejected", so the error being non-nil is
 	// the enforcing case.
+	// The parent id below is never inserted into accounts, so an enforcing
+	// foreign key rejects the insert. Enforcement means the insert errored.
+	const orphanParent = 999999
+
+	reset := func(target execer) {
+		must(exec(target.ExecContext(ctx, `PRAGMA foreign_keys=ON`)))
+		must(exec(target.ExecContext(ctx, `DROP TABLE IF EXISTS child`)))
+		must(exec(target.ExecContext(ctx, childSchema)))
+	}
+
 	fmt.Println()
 	fmt.Println("foreign key behaviour:")
 	for _, tc := range []struct {
@@ -77,30 +87,37 @@ func main() {
 		{"unpinned pool", false},
 		{"pinned single connection", true},
 	} {
-		orphanRejected := false
-		func() {
-			// Both *sql.DB and *sql.Conn satisfy these three methods, so one
-			// branch handles the pool and the pinned case identically.
-			conn, err := db.Conn(context.Background())
-			if tc.pinned {
-				must(err)
-				defer conn.Close()
-				must(exec(conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`)))
-				must(exec(conn.ExecContext(ctx, `DROP TABLE IF EXISTS child`)))
-				must(exec(conn.ExecContext(ctx, childSchema)))
-				_, err = conn.ExecContext(ctx, `INSERT INTO child (id, parent) VALUES (1, 999999)`)
-				orphanRejected = err != nil
-				return
-			}
+		rejected := false
+		if tc.pinned {
+			conn, err := db.Conn(ctx)
+			must(err)
+			reset(conn)
+			_, err = conn.ExecContext(ctx, `INSERT INTO child (id, parent) VALUES (1, ?)`, orphanParent)
+			rejected = err != nil
 			conn.Close()
-			must(exec(db.Exec(`PRAGMA foreign_keys=ON`)))
-			must(exec(db.Exec(`DROP TABLE IF EXISTS child`)))
-			must(exec(db.Exec(childSchema)))
-			_, err = db.Exec(`INSERT INTO child (id, parent) VALUES (1, 999999)`)
-			orphanRejected = err != nil
-		}()
-		fmt.Printf("  %-26s orphan rejected=%v\n", tc.name, orphanRejected)
+		} else {
+			reset(db)
+			_, err := db.ExecContext(ctx, `INSERT INTO child (id, parent) VALUES (1, ?)`, orphanParent)
+			rejected = err != nil
+		}
+		fmt.Printf("  %-26s orphan rejected=%v\n", tc.name, rejected)
 	}
+
+	// The actual point of the exercise. Pragmas are per connection, so setting
+	// one on connection A and writing through connection B proves it. That is
+	// why the daemon must set pragmas on every connection it opens rather than
+	// once at startup.
+	a, err := db.Conn(ctx)
+	must(err)
+	defer a.Close()
+	reset(a)
+
+	b, err := db.Conn(ctx)
+	must(err)
+	defer b.Close()
+	_, crossErr := b.ExecContext(ctx, `INSERT INTO child (id, parent) VALUES (1, ?)`, orphanParent)
+	fmt.Printf("  %-26s orphan rejected=%v (expected false, pragma was set on another connection)\n",
+		"pragma on conn A, write on B", crossErr != nil)
 
 	fi, _ := os.Stat(path)
 	fmt.Printf("rows inserted:          %d\n", n)
@@ -126,6 +143,12 @@ func insert(db *sql.DB, rows int) error {
 }
 
 func exec(_ any, err error) error { return err }
+
+// execer is satisfied by both *sql.DB and *sql.Conn, so the probe can treat the
+// pool and a pinned connection the same way.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
 
 func must(err error) {
 	if err != nil {

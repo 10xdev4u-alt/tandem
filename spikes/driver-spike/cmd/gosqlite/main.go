@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	sqlite "gosqlite.org"
@@ -80,6 +81,18 @@ func main() {
 		}
 	})
 
+	// A probe that cannot fail is not a gate. Every assertion below is counted
+	// and a single failure exits non-zero.
+	var failures []string
+	check1 := func(name string, ok bool, detail string) {
+		status := "PASS"
+		if !ok {
+			status = "FAIL"
+			failures = append(failures, name)
+		}
+		fmt.Printf("  [%-4s] %-34s %s\n", status, name, detail)
+	}
+
 	if len(changeset) == 0 {
 		fmt.Println("RESULT: no changeset produced")
 		os.Exit(1)
@@ -136,9 +149,13 @@ func main() {
 	must(replica.sc.QueryRowContext(ctx, `SELECT count(*) FROM accounts`).Scan(&afterInvert))
 
 	fmt.Printf("\napply elapsed:           %s\n", applyElapsed.Round(time.Millisecond))
-	fmt.Printf("replica rows:            %d, expected %d, ok=%v\n", afterApply, *rows, afterApply == *rows)
-	fmt.Printf("after reapply:           %d rows, reapply errored=%v, count unchanged=%v\n",
-		afterReapply, reapplyErr != nil, afterReapply == *rows)
+	fmt.Println()
+	check1("changeset captured", len(changeset) > 0, fmt.Sprintf("%d bytes", len(changeset)))
+	check1("replica matches source", afterApply == *rows, fmt.Sprintf("%d rows", afterApply))
+	// The expected failure is a conflict abort, not any error at all.
+	check1("reapply fails as conflict", reapplyErr != nil && strings.Contains(reapplyErr.Error(), "aborted"),
+		fmt.Sprintf("err=%v", reapplyErr))
+	check1("reapply changed nothing", afterReapply == *rows, fmt.Sprintf("%d rows", afterReapply))
 
 	// Does an aborted apply leave a partial write behind? That is the question
 	// that matters, and re-applying to a full replica cannot answer it because
@@ -177,13 +194,22 @@ func main() {
 	var integrity string
 	must(partial.sc.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity))
 
-	fmt.Printf("\npartial-overlap apply (replica pre-seeded with %d of %d rows):\n", beforePartial, *rows)
-	fmt.Printf("  error:               %v\n", partialErr)
-	fmt.Printf("  rows before/after:   %d / %d\n", beforePartial, afterPartial)
-	fmt.Printf("  max(id) after:       %d (above %d would mean new rows leaked in)\n", maxID, beforePartial)
-	fmt.Printf("  all-or-nothing:      %v\n", afterPartial == beforePartial)
-	fmt.Printf("  integrity_check:     %s\n", integrity)
-	fmt.Printf("after inverse:           %d, undo works=%v\n", afterInvert, afterInvert == 0 && invertErr == nil)
+	fmt.Println()
+	fmt.Printf("partial-overlap apply (replica pre-seeded with %d of %d rows):\n", beforePartial, *rows)
+	check1("partial apply fails", partialErr != nil, fmt.Sprintf("err=%v", partialErr))
+	check1("partial apply wrote nothing", afterPartial == beforePartial,
+		fmt.Sprintf("rows %d -> %d", beforePartial, afterPartial))
+	check1("no new rows leaked", maxID <= beforePartial,
+		fmt.Sprintf("max(id)=%d, pre-seed was %d", maxID, beforePartial))
+	check1("integrity ok", integrity == "ok", integrity)
+	check1("inverse empties replica", afterInvert == 0 && invertErr == nil,
+		fmt.Sprintf("rows=%d err=%v", afterInvert, invertErr))
+
+	if len(failures) > 0 {
+		fmt.Printf("\n%d assertion(s) FAILED: %v\n", len(failures), failures)
+		os.Exit(1)
+	}
+	fmt.Printf("\nall assertions passed\n")
 }
 
 // insertDriver runs the workload on the driver connection so the open session
