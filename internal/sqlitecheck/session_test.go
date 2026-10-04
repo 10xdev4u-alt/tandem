@@ -3,7 +3,6 @@ package sqlitecheck
 import (
 	"database/sql"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -88,14 +87,13 @@ func TestErrorMentionsBothFlags(t *testing.T) {
 }
 
 // TestCheckAndRequireAgreeOnRealDatabase wires the two halves together against
-// a live database rather than a hand built Status. That pairing is the thing
-// the daemon will actually call, so it gets tested as a pair.
+// a live database rather than a hand built Status, because that pairing is what
+// the daemon actually calls.
 //
-// The expectation is inverted on purpose. When the suite is built without the
-// CGO_CFLAGS this must fail loudly, which is the behaviour ADR 0001 depends on.
-// When it is built with them, Check reports enabled and Require is satisfied.
-// Either way the assertion below states which build it is looking at, so a
-// reader is never left guessing why a run passed.
+// The branch is chosen from the database's own answer, not from the
+// environment. Keying off CGO_CFLAGS being non-empty would be wrong: an
+// unrelated value such as -O2 would send the test down the enabled path and
+// then fail against a database that correctly reports no session extension.
 func TestCheckAndRequireAgreeOnRealDatabase(t *testing.T) {
 	st, err := Check(openTemp(t))
 	if err != nil {
@@ -103,28 +101,53 @@ func TestCheckAndRequireAgreeOnRealDatabase(t *testing.T) {
 	}
 	requireErr := Require(st)
 
-	const wantEnabled = "0"
-	if os.Getenv("CGO_CFLAGS") == "" {
-		// Built without the flags. Require must refuse.
+	if !st.Enabled {
 		if requireErr == nil {
-			t.Fatalf("built without CGO_CFLAGS, ENABLE_SESSION=%v, but Require returned nil", st.Enabled)
+			t.Fatalf("database reports no session extension, but Require returned nil")
 		}
 		var missing *ErrNoSession
 		if !errors.As(requireErr, &missing) {
-			t.Fatalf("built without CGO_CFLAGS, error is %T, want *ErrNoSession", requireErr)
+			t.Fatalf("error is %T, want *ErrNoSession", requireErr)
 		}
-		t.Logf("built without flags, correctly refused: %v", requireErr)
+		t.Logf("database has no session extension, correctly refused: %v", requireErr)
 		return
 	}
 
-	// Built with the flags, or by a caller that set them another way.
-	t.Logf("built with CGO_CFLAGS=%s, ENABLE_SESSION=%v, Require=%v",
-		os.Getenv("CGO_CFLAGS"), st.Enabled, requireErr)
+	t.Logf("database has the session extension, Require=%v", requireErr)
 	if requireErr != nil {
-		t.Fatalf("built with CGO_CFLAGS but Require refused: %v", requireErr)
+		t.Fatalf("database reports the session extension, but Require refused: %v", requireErr)
+	}
+}
+
+// TestEnabledBuildIsDetected is the other half, and it only runs where it can
+// succeed. A suite built without the flags has no enabled build available, so
+// it skips rather than asserting something it cannot know.
+func TestEnabledBuildIsDetected(t *testing.T) {
+	st, err := Check(openTemp(t))
+	if err != nil {
+		t.Fatalf("Check: %v", err)
 	}
 	if !st.Enabled {
-		t.Fatalf("CGO_CFLAGS is set but ENABLE_SESSION reported false")
+		t.Skip("built without the session flags, nothing to assert about an enabled build")
 	}
-	_ = wantEnabled
+	if err := Require(st); err != nil {
+		t.Fatalf("Require refused an enabled build: %v", err)
+	}
+}
+
+// TestUnflaggedBuildIsRefused is the same idea from the other side, and it is
+// the assertion that keeps the check honest: a database with no session
+// extension has to be refused, so that losing the build flag becomes a loud
+// startup failure instead of a silent loss of change capture.
+func TestUnflaggedBuildIsRefused(t *testing.T) {
+	st, err := Check(openTemp(t))
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if st.Enabled {
+		t.Skip("built with the session flags, cannot assert the refusal path here")
+	}
+	if err := Require(st); err == nil {
+		t.Fatal("Require accepted a database with no session extension")
+	}
 }
