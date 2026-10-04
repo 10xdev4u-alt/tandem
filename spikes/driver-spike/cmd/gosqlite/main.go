@@ -111,11 +111,11 @@ func main() {
 	var afterApply int
 	must(replica.sc.QueryRowContext(ctx, `SELECT count(*) FROM accounts`).Scan(&afterApply))
 
-	// Re-apply. A changeset that duplicates rows on reapply is unsafe.
+	// Re-apply the same changeset. This does NOT succeed idempotently, it
+	// errors. Say so plainly rather than reporting a count match as idempotency.
+	var reapplyErr error
 	replica.raw(func(c *sqlite.Conn) {
-		if err := c.ApplyChangeset(changeset); err != nil {
-			fmt.Println("second apply failed:", err)
-		}
+		reapplyErr = c.ApplyChangeset(changeset)
 	})
 	var afterReapply int
 	must(replica.sc.QueryRowContext(ctx, `SELECT count(*) FROM accounts`).Scan(&afterReapply))
@@ -137,7 +137,52 @@ func main() {
 
 	fmt.Printf("\napply elapsed:           %s\n", applyElapsed.Round(time.Millisecond))
 	fmt.Printf("replica rows:            %d, expected %d, ok=%v\n", afterApply, *rows, afterApply == *rows)
-	fmt.Printf("after reapply:           %d, idempotent=%v\n", afterReapply, afterReapply == *rows)
+	fmt.Printf("after reapply:           %d rows, reapply errored=%v, count unchanged=%v\n",
+		afterReapply, reapplyErr != nil, afterReapply == *rows)
+
+	// Does an aborted apply leave a partial write behind? That is the question
+	// that matters, and re-applying to a full replica cannot answer it because
+	// the first INSERT conflicts and nothing would be written either way.
+	// Pre-seed the replica with the first half, then apply the whole changeset.
+	partial, err := open(filepath.Join(dir, "partial.db"))
+	must(err)
+	defer partial.close()
+	must(exec(partial.sc.ExecContext(ctx, `PRAGMA journal_mode=WAL`)))
+	must(exec(partial.sc.ExecContext(ctx, schema)))
+
+	half := *rows / 2
+	tx, err := partial.sc.BeginTx(ctx, nil)
+	must(err)
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO accounts (id, owner, email, cents) VALUES (?, ?, ?, ?)`)
+	must(err)
+	for i := 1; i <= half; i++ {
+		_, err = stmt.ExecContext(ctx, i, fmt.Sprintf("owner-%d", i), fmt.Sprintf("o%d@example.test", i), i*100)
+		must(err)
+	}
+	must(stmt.Close())
+	must(tx.Commit())
+
+	var beforePartial int
+	must(partial.sc.QueryRowContext(ctx, `SELECT count(*) FROM accounts`).Scan(&beforePartial))
+
+	var partialErr error
+	partial.raw(func(c *sqlite.Conn) {
+		partialErr = c.ApplyChangeset(changeset)
+	})
+
+	var afterPartial, maxID int
+	must(partial.sc.QueryRowContext(ctx, `SELECT count(*) FROM accounts`).Scan(&afterPartial))
+	must(partial.sc.QueryRowContext(ctx, `SELECT coalesce(max(id), 0) FROM accounts`).Scan(&maxID))
+
+	var integrity string
+	must(partial.sc.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity))
+
+	fmt.Printf("\npartial-overlap apply (replica pre-seeded with %d of %d rows):\n", beforePartial, *rows)
+	fmt.Printf("  error:               %v\n", partialErr)
+	fmt.Printf("  rows before/after:   %d / %d\n", beforePartial, afterPartial)
+	fmt.Printf("  max(id) after:       %d (above %d would mean new rows leaked in)\n", maxID, beforePartial)
+	fmt.Printf("  all-or-nothing:      %v\n", afterPartial == beforePartial)
+	fmt.Printf("  integrity_check:     %s\n", integrity)
 	fmt.Printf("after inverse:           %d, undo works=%v\n", afterInvert, afterInvert == 0 && invertErr == nil)
 }
 

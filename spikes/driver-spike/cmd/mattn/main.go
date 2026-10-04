@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -42,6 +43,8 @@ func main() {
 	must(err)
 	defer db.Close()
 
+	ctx := context.Background()
+
 	fmt.Printf("go       %s\n", runtime.Version())
 	fmt.Printf("goos     %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	fmt.Printf("rows     %d\n\n", *rows)
@@ -59,11 +62,45 @@ func main() {
 	var n int
 	must(db.QueryRow(`SELECT count(*) FROM accounts`).Scan(&n))
 
-	// Foreign keys are off by default here and always on in Postgres.
-	must(exec(db.Exec(`PRAGMA foreign_keys=ON`)))
-	must(exec(db.Exec(childSchema)))
-	_, fkErr := db.Exec(`INSERT INTO child (id, parent) VALUES (1, 999999)`)
-	fmt.Printf("foreign key enforced:    %v\n", fkErr == nil)
+	// Foreign keys are off by default here and always on in Postgres. Test it
+	// both ways, because an earlier version of this probe reported the boolean
+	// inverted and drew a conclusion from it that was not true.
+	//
+	// The check is "did the insert get rejected", so the error being non-nil is
+	// the enforcing case.
+	fmt.Println()
+	fmt.Println("foreign key behaviour:")
+	for _, tc := range []struct {
+		name   string
+		pinned bool
+	}{
+		{"unpinned pool", false},
+		{"pinned single connection", true},
+	} {
+		orphanRejected := false
+		func() {
+			// Both *sql.DB and *sql.Conn satisfy these three methods, so one
+			// branch handles the pool and the pinned case identically.
+			conn, err := db.Conn(context.Background())
+			if tc.pinned {
+				must(err)
+				defer conn.Close()
+				must(exec(conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`)))
+				must(exec(conn.ExecContext(ctx, `DROP TABLE IF EXISTS child`)))
+				must(exec(conn.ExecContext(ctx, childSchema)))
+				_, err = conn.ExecContext(ctx, `INSERT INTO child (id, parent) VALUES (1, 999999)`)
+				orphanRejected = err != nil
+				return
+			}
+			conn.Close()
+			must(exec(db.Exec(`PRAGMA foreign_keys=ON`)))
+			must(exec(db.Exec(`DROP TABLE IF EXISTS child`)))
+			must(exec(db.Exec(childSchema)))
+			_, err = db.Exec(`INSERT INTO child (id, parent) VALUES (1, 999999)`)
+			orphanRejected = err != nil
+		}()
+		fmt.Printf("  %-26s orphan rejected=%v\n", tc.name, orphanRejected)
+	}
 
 	fi, _ := os.Stat(path)
 	fmt.Printf("rows inserted:          %d\n", n)
