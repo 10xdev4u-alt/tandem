@@ -59,6 +59,7 @@ func (d *DB) StartSession(tables ...string) (*Session, error) {
 	}
 
 	sess := &Session{db: d, s: s}
+	d.trackSession(sess)
 	runtime.SetFinalizer(sess, func(x *Session) { _ = x.Close() })
 
 	if err := sess.attachAll(tables); err != nil {
@@ -142,9 +143,34 @@ func (s *Session) Close() error {
 	if s.closed || s.s == nil {
 		return nil
 	}
+	if s.db != nil {
+		s.db.untrackSession(s)
+		// Deleting a session touches the connection, so never do it after the
+		// connection is gone. DB.Close closes sessions before the handle, and
+		// this guard covers the reverse order.
+		if s.db.closed() {
+			s.s = nil
+			s.closed = true
+			runtime.SetFinalizer(s, nil)
+			return nil
+		}
+	}
 	C.sqlite3session_delete(s.s)
 	s.s = nil
 	s.closed = true
 	runtime.SetFinalizer(s, nil)
+	return nil
+}
+
+// ready reports why this session cannot be used, if it cannot. A session is
+// unusable once it is closed, and equally unusable once its database is gone,
+// because every session call dereferences the connection.
+func (s *Session) ready() error {
+	if s.closed || s.s == nil {
+		return errors.New("session is closed")
+	}
+	if s.db == nil || s.db.closed() {
+		return errors.New("database is closed")
+	}
 	return nil
 }

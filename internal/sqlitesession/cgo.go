@@ -17,51 +17,62 @@
 // loudly at link time rather than silently at runtime.
 package sqlitesession
 
-// #cgo CFLAGS: -DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK
-// #include <stdlib.h>
-// #include <stdint.h>
-//
-// typedef struct sqlite3 sqlite3;
-// typedef struct sqlite3_stmt sqlite3_stmt;
-// typedef struct sqlite3_session sqlite3_session;
-// typedef struct sqlite3changeset_iter sqlite3changeset_iter;
-// typedef struct sqlite3_value sqlite3_value;
-//
-// extern int   sqlite3_open_v2(const char*, sqlite3**, int, const char*);
-// extern int   sqlite3_close(sqlite3*);
-// extern char* sqlite3_errmsg(sqlite3*);
-// extern int   sqlite3_exec(sqlite3*, const char*, void*, void*, char**);
-// extern int   sqlite3_prepare_v2(sqlite3*, const char*, int, sqlite3_stmt**, const char**);
-// extern int   sqlite3_step(sqlite3_stmt*);
-// extern int   sqlite3_finalize(sqlite3_stmt*);
-// extern long long sqlite3_column_int64(sqlite3_stmt*, int);
-// extern int   sqlite3_bind_text(sqlite3_stmt*, int, const char*, int, void*);
-// extern const unsigned char* sqlite3_column_text(sqlite3_stmt*, int);
-// extern void  sqlite3_free(void*);
-// extern void* sqlite3_malloc64(int64_t);
-//
-// extern int   sqlite3session_create(sqlite3*, const char*, sqlite3_session**);
-// extern int   sqlite3session_attach(sqlite3_session*, const char*);
-// extern int   sqlite3session_enable(sqlite3_session*, int);
-// extern int   sqlite3session_isempty(sqlite3_session*);
-// extern int   sqlite3session_changeset(sqlite3_session*, int*, void**);
-// extern int   sqlite3session_patchset(sqlite3_session*, int*, void**);
-// extern void  sqlite3session_delete(sqlite3_session*);
-//
-// extern int sqlite3changeset_start(sqlite3changeset_iter**, int, void*);
-// extern int sqlite3changeset_next(sqlite3changeset_iter*);
-// extern int sqlite3changeset_op(sqlite3changeset_iter*, const char**, int*, int*);
-// extern int sqlite3changeset_finalize(sqlite3changeset_iter*);
-//
-// extern int sqlite3changeset_invert(int, void*, int*, void**);
-// extern int sqlite3changeset_concat(int, void*, int, void*, int*, void**);
-// extern int sqlite3changeset_apply_v2(sqlite3*, int, void*, void*, void*, void*, void**, int*);
+/*
+#cgo CFLAGS: -DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK
+#include <stdlib.h>
+#include <stdint.h>
+
+typedef struct sqlite3 sqlite3;
+typedef struct sqlite3_stmt sqlite3_stmt;
+typedef struct sqlite3_session sqlite3_session;
+typedef struct sqlite3changeset_iter sqlite3changeset_iter;
+typedef struct sqlite3_value sqlite3_value;
+
+extern int   sqlite3_open_v2(const char*, sqlite3**, int, const char*);
+extern int   sqlite3_close(sqlite3*);
+extern char* sqlite3_errmsg(sqlite3*);
+extern int   sqlite3_exec(sqlite3*, const char*, void*, void*, char**);
+extern int   sqlite3_prepare_v2(sqlite3*, const char*, int, sqlite3_stmt**, const char**);
+extern int   sqlite3_step(sqlite3_stmt*);
+extern int   sqlite3_finalize(sqlite3_stmt*);
+extern long long sqlite3_column_int64(sqlite3_stmt*, int);
+extern int   sqlite3_bind_text(sqlite3_stmt*, int, const char*, int, void*);
+
+// SQLITE_TRANSIENT makes SQLite copy the string. A null destructor means SQLite
+// keeps the pointer, so freeing the buffer right after the bind leaves it
+// reading freed memory. The sentinel is address -1 cast to a destructor, which
+// cannot be written in Go.
+int bind_text_copy(sqlite3_stmt *s, int i, const char *v) {
+  return sqlite3_bind_text(s, i, v, -1, (void *)(-1));
+}
+extern const unsigned char* sqlite3_column_text(sqlite3_stmt*, int);
+extern void  sqlite3_free(void*);
+extern void* sqlite3_malloc64(int64_t);
+
+extern int   sqlite3session_create(sqlite3*, const char*, sqlite3_session**);
+extern int   sqlite3session_attach(sqlite3_session*, const char*);
+extern int   sqlite3session_enable(sqlite3_session*, int);
+extern int   sqlite3session_isempty(sqlite3_session*);
+extern int   sqlite3session_changeset(sqlite3_session*, int*, void**);
+extern int   sqlite3session_patchset(sqlite3_session*, int*, void**);
+extern void  sqlite3session_delete(sqlite3_session*);
+
+extern int sqlite3changeset_start(sqlite3changeset_iter**, int, void*);
+extern int sqlite3changeset_next(sqlite3changeset_iter*);
+extern int sqlite3changeset_op(sqlite3changeset_iter*, const char**, int*, int*);
+extern int sqlite3changeset_finalize(sqlite3changeset_iter*);
+
+extern int sqlite3changeset_invert(int, void*, int*, void**);
+extern int sqlite3changeset_concat(int, void*, int, void*, int*, void**);
+extern int sqlite3changeset_apply_v2(sqlite3*, int, void*, void*, void*, void*, void**, int*);
+*/
 import "C"
 
 import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"unsafe"
 )
 
@@ -101,7 +112,9 @@ func cstr(s string) (*C.char, func()) {
 
 // DB is a SQLite connection that can record and replay changesets.
 type DB struct {
-	h *C.sqlite3
+	mu       sync.Mutex
+	h        *C.sqlite3
+	sessions map[*Session]struct{}
 }
 
 // Open opens or creates a database file.
@@ -120,68 +133,70 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("sqlite3_open_v2(%q): %s", path, msg)
 	}
 
-	db := &DB{h: h}
+	db := &DB{h: h, sessions: make(map[*Session]struct{})}
 	runtime.SetFinalizer(db, func(d *DB) { _ = d.Close() })
 	return db, nil
 }
 
-// Close releases the connection.
+// Close tears down any open sessions and then releases the connection.
+//
+// Sessions go first. sqlite3_close does not report SQLITE_BUSY for open
+// sessions, so closing the handle while one is alive leaves a dangling pointer
+// and the later Session.Close touches freed memory.
 func (d *DB) Close() error {
+	// Snapshot the sessions and drop the handle under the lock, then do the
+	// work outside it. Session.Close takes the same lock to unregister, so
+	// holding it here would deadlock.
+	d.mu.Lock()
 	if d.h == nil {
+		d.mu.Unlock()
 		return nil
 	}
 	h := d.h
-	d.h = nil
-	runtime.SetFinalizer(d, nil)
-	if rc := C.sqlite3_close(h); rc != rcOK {
+	sessions := make([]*Session, 0, len(d.sessions))
+	for s := range d.sessions {
+		sessions = append(sessions, s)
+	}
+	d.sessions = make(map[*Session]struct{})
+	d.mu.Unlock()
+
+	for _, s := range sessions {
+		_ = s.Close()
+	}
+
+	rc := C.sqlite3_close(h)
+	if rc != rcOK {
 		return fmt.Errorf("sqlite3_close: rc=%d", rc)
 	}
+
+	d.mu.Lock()
+	d.h = nil
+	runtime.SetFinalizer(d, nil)
+	d.mu.Unlock()
 	return nil
 }
 
-// Exec runs one or more statements, discarding rows.
-func (d *DB) Exec(sql string) error {
-	csql, freeSQL := cstr(sql)
-	defer freeSQL()
-
-	var errmsg *C.char
-	rc := C.sqlite3_exec(d.h, csql, nil, nil, &errmsg)
-	if errmsg != nil {
-		defer C.sqlite3_free(unsafe.Pointer(errmsg))
+func (d *DB) trackSession(s *Session) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sessions == nil {
+		d.sessions = make(map[*Session]struct{})
 	}
-	if rc != rcOK {
-		if errmsg != nil {
-			return fmt.Errorf("exec: %s", C.GoString(errmsg))
-		}
-		return fmt.Errorf("exec: rc=%d", rc)
-	}
-	return nil
+	d.sessions[s] = struct{}{}
 }
 
-// QueryInt64 runs a statement expected to yield one integer.
-func (d *DB) QueryInt64(sql string) (int64, error) {
-	csql, freeSQL := cstr(sql)
-	defer freeSQL()
-
-	var stmt *C.sqlite3_stmt
-	if rc := C.sqlite3_prepare_v2(d.h, csql, prepareTail, &stmt, nil); rc != rcOK || stmt == nil {
-		return 0, fmt.Errorf("prepare %q: rc=%d", sql, rc)
-	}
-	defer C.sqlite3_finalize(stmt)
-
-	if rc := C.sqlite3_step(stmt); rc != rcRow {
-		return 0, fmt.Errorf("step %q: rc=%d", sql, rc)
-	}
-	return int64(C.sqlite3_column_int64(stmt, 0)), nil
+func (d *DB) untrackSession(s *Session) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.sessions, s)
 }
 
-// SessionEnabled reports whether the linked SQLite has the session extension.
-func (d *DB) SessionEnabled() (bool, error) {
-	v, err := d.QueryInt64(`SELECT sqlite_compileoption_used('ENABLE_SESSION')`)
-	if err != nil {
-		return false, err
-	}
-	return v == 1, nil
+// closed reports whether the handle is gone, which is what every method touching
+// C needs to know before it dereferences it.
+func (d *DB) closed() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.h == nil
 }
 
 // stmt is a prepared statement with the small surface this package needs.
@@ -196,7 +211,7 @@ func (d *DB) prepare(sql *C.char) (*stmt, error) {
 }
 
 func (st *stmt) bindText(i int, v *C.char) error {
-	if rc := C.sqlite3_bind_text(st.s, C.int(i), v, -1, nil); rc != rcOK {
+	if rc := C.bind_text_copy(st.s, C.int(i), v); rc != rcOK {
 		return fmt.Errorf("bind_text(%d): rc=%d", i, rc)
 	}
 	return nil
@@ -214,7 +229,10 @@ func (st *stmt) text(i int) string {
 }
 
 // queryStrings runs a text query and collects every row's first column.
-func (d *DB) queryStrings(sql string) ([]string, error) {
+func (d *DB) queryStrings(sql string, args ...string) ([]string, error) {
+	if d.closed() {
+		return nil, errors.New("database is closed")
+	}
 	csql, free := cstr(sql)
 	defer free()
 
@@ -223,6 +241,15 @@ func (d *DB) queryStrings(sql string) ([]string, error) {
 		return nil, err
 	}
 	defer st.finalize()
+
+	for i, a := range args {
+		ca, freeA := cstr(a)
+		err := st.bindText(i+1, ca)
+		freeA()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	var out []string
 	for {
@@ -239,14 +266,17 @@ func (d *DB) queryStrings(sql string) ([]string, error) {
 func (st *stmt) finalize() { C.sqlite3_finalize(st.s) }
 
 // queryInt64 runs a single integer query, optionally binding one text argument.
-func (d *DB) queryInt64(sql string, arg string) (int64, error) {
+func (d *DB) queryInt64(sql string, args ...string) (int64, error) {
+	if d.closed() {
+		return 0, errors.New("database is closed")
+	}
 	csql, freeSQL := cstr(sql)
 	defer freeSQL()
 
 	var cargs *C.char
-	if arg != "" {
+	if len(args) > 0 && args[0] != "" {
 		var freeArg func()
-		cargs, freeArg = cstr(arg)
+		cargs, freeArg = cstr(args[0])
 		defer freeArg()
 	}
 
@@ -304,4 +334,68 @@ func cbytes(b []byte) (unsafe.Pointer, func()) {
 	buf := unsafe.Slice((*byte)(p), len(b))
 	copy(buf, b)
 	return p, func() { C.sqlite3_free(p) }
+}
+
+// QueryInt64 reads a single integer from a one-row, one-column query.
+func (d *DB) QueryInt64(sql string) (int64, error) {
+	return d.queryInt64(sql)
+}
+
+// hasTable reports whether a table exists, which is a different question from
+// whether it has a primary key.
+func (d *DB) hasTable(name string) bool {
+	if d.closed() {
+		return false
+	}
+	rows, err := d.queryStrings(
+		`SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ? LIMIT 1`, name)
+	if err != nil {
+		return false
+	}
+	return len(rows) > 0
+}
+
+// Exec runs a statement that returns no rows.
+func (d *DB) Exec(sql string) error {
+	if d.closed() {
+		return errors.New("database is closed")
+	}
+	csql, free := cstr(sql)
+	defer free()
+
+	st, err := d.prepare(csql)
+	if err != nil {
+		return err
+	}
+	defer st.finalize()
+
+	switch rc := st.step(); rc {
+	case rcOK, rcDone:
+		return nil
+	default:
+		return fmt.Errorf("sqlite3_step: rc=%d: %s", rc, d.errMessage())
+	}
+}
+
+// errMessage reads the connection's error string. It copies out of C memory and
+// frees it, because sqlite3_errmsg returns a pointer the caller owns.
+func (d *DB) errMessage() string {
+	cs := C.sqlite3_errmsg(d.h)
+	if cs == nil {
+		return "unknown error"
+	}
+	return C.GoString(cs)
+}
+
+// SessionEnabled reports whether this build has the session extension.
+//
+// This asks the compile options rather than sqlite3session_config, which is
+// variadic and cannot be called from cgo. The question is really about the
+// build, not the connection, so the compile option is the honest source.
+func (d *DB) SessionEnabled() (bool, error) {
+	v, err := d.QueryInt64(`SELECT sqlite_compileoption_used('ENABLE_SESSION')`)
+	if err != nil {
+		return false, err
+	}
+	return v == 1, nil
 }

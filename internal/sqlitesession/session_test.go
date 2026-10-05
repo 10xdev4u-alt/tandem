@@ -229,3 +229,68 @@ func TestStartSessionOnClosedDatabaseFails(t *testing.T) {
 		t.Fatal("HasPrimaryKey on a closed database returned no error")
 	}
 }
+
+// TestCloseWithOpenSessionsDoesNotUseFreedMemory is the regression test for the
+// use-after-free found in review. sqlite3_close does not report open sessions as
+// busy, so closing the connection first and the session second left the session
+// pointing at freed memory and sqlite3session_delete touched it.
+func TestCloseWithOpenSessionsDoesNotUseFreedMemory(t *testing.T) {
+	db, err := sqlitesession.Open(filepath.Join(t.TempDir(), "uaf.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := db.Exec(accountsDDL); err != nil {
+		t.Fatalf("ddl: %v", err)
+	}
+
+	sess, err := db.StartSession("accounts")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	// Deliberately the wrong order. This is what used to fault.
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := sess.Close(); err != nil {
+		t.Fatalf("session Close after db Close: %v", err)
+	}
+	if _, err := sess.Changeset(); err == nil {
+		t.Error("Changeset on a session whose database is closed returned no error")
+	}
+}
+
+// TestSessionMethodsRefuseAfterDatabaseClose covers the same class on the read
+// side. Each of these dereferences the connection.
+func TestSessionMethodsRefuseAfterDatabaseClose(t *testing.T) {
+	db := openDB(t, accountsDDL)
+	sess, err := db.StartSession("accounts")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if _, err := sess.IsEmpty(); err == nil {
+		t.Error("IsEmpty returned no error after the database closed")
+	}
+	if _, err := sess.Changeset(); err == nil {
+		t.Error("Changeset returned no error after the database closed")
+	}
+	if _, err := sess.Patchset(); err == nil {
+		t.Error("Patchset returned no error after the database closed")
+	}
+}
+
+// TestStartSessionOnClosedDatabaseFailsUnchanged guards the startup path: asking
+// for a session after the handle is gone must fail rather than attach to it.
+func TestStartSessionOnClosedDatabaseFailsUnchanged(t *testing.T) {
+	db := openDB(t, accountsDDL)
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := db.StartSession("accounts"); err == nil {
+		t.Error("StartSession on a closed database returned no error")
+	}
+}
