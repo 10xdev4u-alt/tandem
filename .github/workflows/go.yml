@@ -18,11 +18,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # One source of truth for the flags. The Makefile carries the same pair for
-  # local builds; if the two ever disagree, the Makefile is wrong and this
-  # workflow is the thing that catches it.
-  SESSION_CFLAGS: -DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK
 
 jobs:
   test:
@@ -32,8 +27,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The flags are spelled out here rather than read from an env block
+          # because the env context is not available inside strategy. The
+          # without-extension leg has to carry an empty value rather than
+          # omitting the key, so the step that exports it runs for both legs.
           - session: with-extension
-            cflags: ${{ env.SESSION_CFLAGS }}
+            cflags: -DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK
           - session: without-extension
             cflags: ''
     steps:
