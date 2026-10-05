@@ -1,0 +1,86 @@
+name: go
+
+# The session extension has to be compiled into the SQLite amalgamation, and a
+# per package #cgo CFLAGS directive cannot reach another package's C sources.
+# So the flags are a property of the whole program, which means the interesting
+# question in CI is not only "does it pass" but "does it pass in both builds".
+#
+# Both are matrix legs. A build without the extension must fail to link loudly
+# rather than silently record nothing, and a build with it must actually carry
+# it. Running only the passing leg would hide exactly the failure this project
+# was built to avoid.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # One source of truth for the flags. The Makefile carries the same pair for
+  # local builds; if the two ever disagree, the Makefile is wrong and this
+  # workflow is the thing that catches it.
+  SESSION_CFLAGS: -DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK
+
+jobs:
+  test:
+    name: test (${{ matrix.session }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - session: with-extension
+            cflags: ${{ env.SESSION_CFLAGS }}
+          - session: without-extension
+            cflags: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set CGO_CFLAGS for this leg
+        run: echo "CGO_CFLAGS=${{ matrix.cflags }}" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # The without-extension leg cannot link the session package, so its
+      # coverage job is skipped rather than allowed to fail the whole run. What
+      # it proves is the loud link failure above, which is the behaviour we
+      # actually rely on.
+      - name: Coverage
+        if: matrix.session == 'with-extension'
+        run: go test ./... -count=1 -timeout 120s -coverprofile=coverage.out -covermode=atomic
+
+      - name: Coverage gate
+        if: matrix.session == 'with-extension'
+        run: go run ./tools/coverage-gate coverage.out 80
+
+  # Runs the whole Makefile the way a developer does, so a broken target cannot
+  # hide behind the individual steps above.
+  make:
+    name: make check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make check

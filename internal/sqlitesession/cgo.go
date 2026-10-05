@@ -205,7 +205,7 @@ type stmt struct{ s *C.sqlite3_stmt }
 func (d *DB) prepare(sql *C.char) (*stmt, error) {
 	var h *C.sqlite3_stmt
 	if rc := C.sqlite3_prepare_v2(d.h, sql, prepareTail, &h, nil); rc != rcOK || h == nil {
-		return nil, fmt.Errorf("prepare: rc=%d", rc)
+		return nil, fmt.Errorf("preparing %s: %s", C.GoString(sql), d.errMessage())
 	}
 	return &stmt{s: h}, nil
 }
@@ -373,7 +373,7 @@ func (d *DB) Exec(sql string) error {
 	case rcOK, rcDone:
 		return nil
 	default:
-		return fmt.Errorf("sqlite3_step: rc=%d: %s", rc, d.errMessage())
+		return fmt.Errorf("running %s: %s", sql, d.errMessage())
 	}
 }
 

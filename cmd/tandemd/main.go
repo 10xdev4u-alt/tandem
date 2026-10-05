@@ -9,6 +9,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/10xdev4u-alt/tandem/internal/config"
@@ -17,27 +18,37 @@ import (
 )
 
 func main() {
-	os.Exit(run())
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// run returns the exit status rather than calling os.Exit directly, so every
-// path through main is a real function that could be called from a test if the
-// argument handling ever needs to grow.
-func run() int {
+// run is the whole program, parameterised by its arguments and its two output
+// streams.
+//
+// It takes them as arguments rather than reading os.Args and os.Stderr itself
+// for one reason: a main that reaches for the globals cannot be tested, and
+// exit statuses are exactly the thing worth testing here. An operator scripting
+// this binary needs to know that a missing key is 1 and a missing flag is 2, and
+// that promise has to be checkable.
+func run(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("tandemd", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	var (
-		configPath  = flag.String("config", "", "path to the JSON configuration file")
-		showVersion = flag.Bool("version", false, "print the version and exit")
+		configPath  = fs.String("config", "", "path to the JSON configuration file")
+		showVersion = fs.Bool("version", false, "print the version and exit")
 	)
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		// ContinueOnError has already written the parse error to stderr.
+		return 2
+	}
 
 	if *showVersion {
-		fmt.Printf("tandemd %s (commit %s)\n", version.Version, version.Commit)
+		fmt.Fprintf(stdout, "tandemd %s (commit %s)\n", version.Version, version.Commit)
 		return 0
 	}
 
 	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "error: --config is required")
-		flag.Usage()
+		fmt.Fprintln(stderr, "error: --config is required")
+		fs.Usage()
 		return 2
 	}
 
@@ -45,13 +56,13 @@ func run() int {
 	if err != nil {
 		// The key is named in the error, which is the whole point of
 		// validating before startup rather than on first use.
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	d, err := daemon.New(cfg, os.Stderr)
+	d, err := daemon.New(cfg, stderr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
@@ -59,7 +70,7 @@ func run() int {
 	defer stop()
 
 	if err := d.Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 	return 0
