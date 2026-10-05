@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,20 +66,46 @@ func TestParseRejectsAnEmptyProfile(t *testing.T) {
 	}
 }
 
-// TestParseSkipsMalformedLines rather than aborting, because a future profile
-// format should not read as zero percent coverage.
-func TestParseSkipsMalformedLines(t *testing.T) {
-	p := profile(t, `mode: atomic
-garbage
-a.go:1.1,2.2 notanumber 1
-b.go:3.1,4.2 5 0
-`)
-	_, _, total, err := Parse(p)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
+// TestParseRejectsMalformedRows is the corrected behaviour, and the reason for
+// it is worth stating. Skipping a row it cannot read drops those statements from
+// the denominator, so a profile that is mostly unreadable reports a high
+// percentage and passes. A gate that passes what it cannot read is worse than no
+// gate at all, because it looks like it is working.
+func TestParseRejectsMalformedRows(t *testing.T) {
+	for name, body := range map[string]string{
+		"not three fields":  "mode: set\ngarbage\n",
+		"non numeric stmts": "mode: set\na.go:1.1,2.2 notanumber 1\n",
+		"non numeric count": "mode: set\na.go:1.1,2.2 5 wat\n",
+		"negative counts":   "mode: set\na.go:1.1,2.2 -5 0\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, _, err := Parse(profile(t, body)); err == nil {
+				t.Error("Parse accepted a malformed profile")
+			}
+		})
 	}
-	if total != 5 {
-		t.Errorf("total = %d, want 5", total)
+}
+
+// TestParseRejectsAMalformedRowEvenWhenOthersAreCovered is the exact attack. One
+// covered row plus one unreadable row must not read as full coverage.
+func TestParseRejectsAMalformedRowEvenWhenOthersAreCovered(t *testing.T) {
+	p := profile(t, "mode: set\na.go:1.1,2.2 10 10\ngarbage\n")
+	pct, _, _, err := Parse(p)
+	if err == nil {
+		t.Fatalf("Parse returned %.1f%% from a profile containing a malformed row", pct)
+	}
+}
+
+// TestCheckRejectsNonFiniteThresholds covers the case where every comparison
+// silently succeeds. NaN <= 0 is false and pct < NaN is false, so a NaN
+// threshold would pass any coverage at all while looking properly configured.
+func TestCheckRejectsNonFiniteThresholds(t *testing.T) {
+	p := profile(t, "mode: set\na.go:1.1,2.2 10 0\n")
+	for _, th := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		var out, errOut bytes.Buffer
+		if code, err := Check(p, th, &out, &errOut); code != 2 || err == nil {
+			t.Errorf("Check(threshold=%v) = %d, %v; want 2, error", th, code, err)
+		}
 	}
 }
 
@@ -159,5 +186,51 @@ func TestCheckBoundaryIsInclusive(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code, err := Check(p, 80, &out, &errOut); code != 0 || err != nil {
 		t.Errorf("Check at exactly the threshold = %d, %v; want 0, nil", code, err)
+	}
+}
+
+// TestResolvePositionalRules pins every accepted invocation, because this logic
+// was wrong twice: the documented order is profile then threshold and it was
+// read the other way round, then a flag was compared against its default string
+// so "-profile coverage.out 80" took the 80 as the path. Neither mistake throws
+// an error, it just quietly does the wrong thing.
+func TestResolvePositionalRules(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		profile      string
+		threshold    float64
+		profileGiven bool
+		args         []string
+		wantProfile  string
+		wantThresh   float64
+		wantErr      bool
+	}{
+		{"flags only", "coverage.out", 80, true, nil, "coverage.out", 80, false},
+		{"profile then threshold", "coverage.out", 0, false, []string{"other.out", "80"}, "other.out", 80, false},
+		{"threshold only", "coverage.out", 0, false, []string{"80"}, "coverage.out", 80, false},
+		{"profile only, threshold from flag", "coverage.out", 90, false, []string{"other.out"}, "other.out", 90, false},
+		{"profile by flag, threshold by argument", "a.out", 0, true, []string{"80"}, "a.out", 80, false},
+		{"nothing at all", "coverage.out", 0, false, nil, "coverage.out", 0, false},
+
+		{"profile given twice", "a.out", 0, true, []string{"b.out", "80"}, "", 0, true},
+		{"non numeric threshold", "coverage.out", 0, false, []string{"a.out", "wat"}, "", 0, true},
+		{"non numeric after profile flag", "a.out", 0, true, []string{"wat"}, "", 0, true},
+		{"too many arguments", "coverage.out", 0, false, []string{"a", "b", "c"}, "", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prof, thr, err := resolve(tc.profile, tc.threshold, tc.profileGiven, tc.args)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("resolve(%v) = %q, %v; want an error", tc.args, prof, thr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolve(%v): %v", tc.args, err)
+			}
+			if prof != tc.wantProfile || thr != tc.wantThresh {
+				t.Errorf("resolve(%v) = %q, %v; want %q, %v", tc.args, prof, thr, tc.wantProfile, tc.wantThresh)
+			}
+		})
 	}
 }

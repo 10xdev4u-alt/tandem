@@ -36,7 +36,12 @@ jobs:
           - session: without-extension
             cflags: ''
     steps:
+      # The pull_request workflow runs code from the pull request. Persisting
+      # the token in .git/config would put it within reach of that code, and
+      # nothing here needs an authenticated git operation.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@v5
         with:
@@ -85,6 +90,13 @@ jobs:
           echo "link failed as required, on the symbols that need the extension:"
           grep -m3 "undefined reference" "$RUNNER_TEMP/link.log"
 
+      # The gate runs here, through the Makefile, so the threshold stays in one
+      # place. It was briefly absent from this file after an earlier edit and
+      # nothing noticed, which is exactly what this step is for.
+      - name: Coverage, gated by COVERAGE_THRESHOLD
+        if: matrix.session == 'with-extension'
+        run: make coverage
+
       - name: Check formatting
         run: |
           unformatted=$(gofmt -l .)
@@ -100,7 +112,12 @@ jobs:
     name: make check
     runs-on: ubuntu-latest
     steps:
+      # The pull_request workflow runs code from the pull request. Persisting
+      # the token in .git/config would put it within reach of that code, and
+      # nothing here needs an authenticated git operation.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
