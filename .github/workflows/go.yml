@@ -45,11 +45,45 @@ jobs:
       - name: Set CGO_CFLAGS for this leg
         run: echo "CGO_CFLAGS=${{ matrix.cflags }}" >> "$GITHUB_ENV"
 
-      - name: Build
-        run: go build ./...
-
       - name: Vet
         run: go vet ./...
+
+      - name: Build the daemon
+        if: matrix.session == 'with-extension'
+        run: go build -o "$RUNNER_TEMP/tandemd" ./cmd/tandemd
+
+      # The inverse, and the reason this leg exists.
+      #
+      # The check is on the session package's own test binary rather than on the
+      # daemon, because the daemon does not import sqlitesession yet. It opens a
+      # database through database/sql and asks about the compile option, so it
+      # links cleanly either way. Only something that actually references
+      # sqlite3session_* needs the flags, and that is the package whose
+      # degradation must never be silent.
+      #
+      # go build ./... does not link libraries at all, which is why an earlier
+      # version of this file appeared to pass while checking nothing.
+      - name: Linking must fail loudly without the extension
+        if: matrix.session == 'without-extension'
+        run: |
+          set +e
+          go test -run ZZZNoSuchTest ./internal/sqlitesession 2> "$RUNNER_TEMP/link.log"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "FATAL: the session package linked without the session extension."
+            echo "Either the flags leaked in, or something started compiling the"
+            echo "amalgamation with the extension on by default, which would make"
+            echo "the CGO_CFLAGS story in ADR 0001 wrong."
+            exit 1
+          fi
+          if ! grep -q "undefined reference" "$RUNNER_TEMP/link.log"; then
+            echo "the link failed, but not for the expected reason:"
+            cat "$RUNNER_TEMP/link.log"
+            exit 1
+          fi
+          echo "link failed as required, on the symbols that need the extension:"
+          grep -m3 "undefined reference" "$RUNNER_TEMP/link.log"
 
       - name: Check formatting
         run: |
@@ -70,7 +104,7 @@ jobs:
 
       - name: Coverage gate
         if: matrix.session == 'with-extension'
-        run: go run ./tools/coverage-gate coverage.out 80
+        run: go run ./tools/coverage-gate -profile coverage.out -threshold 80
 
   # Runs the whole Makefile the way a developer does, so a broken target cannot
   # hide behind the individual steps above.

@@ -102,6 +102,22 @@ func main() {
 	)
 	flag.Parse()
 
+	// The threshold is also accepted positionally, because the natural way to
+	// type this by hand is "coverage.out 80" and having that silently mean
+	// "no threshold" is how a gate ends up disabled by accident.
+	if *threshold <= 0 && flag.NArg() > 0 {
+		v, err := strconv.ParseFloat(flag.Arg(0), 64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %q is not a number\n", flag.Arg(0))
+			os.Exit(2)
+		}
+		*threshold = v
+	}
+	if flag.NArg() > 1 {
+		fmt.Fprintln(os.Stderr, "error: expected at most a profile and a threshold")
+		os.Exit(2)
+	}
+
 	code, _ := Check(*profile, *threshold, os.Stdout, os.Stderr)
 	os.Exit(code)
 }
