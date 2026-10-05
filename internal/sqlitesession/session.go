@@ -88,15 +88,32 @@ func (s *Session) attachAll(tables []string) error {
 	}
 
 	for _, t := range tables {
+		// Naming a table is a request, so returning success while recording
+		// nothing is exactly the silent failure this package exists to prevent.
+		// Attach-all is different and keeps reporting keyless tables through
+		// Untrackable, because there the caller asked for everything and a
+		// report is the useful answer.
+		//
+		// Existence is checked separately: HasPrimaryKey also reports false for
+		// a table that is not there, which would misreport a typo as keyless.
+		if !s.db.hasTable(t) {
+			return fmt.Errorf("table %q does not exist", t)
+		}
+		ok, err := s.db.HasPrimaryKey(t)
+		if err != nil {
+			return fmt.Errorf("checking primary key on %q: %w", t, err)
+		}
+		if !ok {
+			return fmt.Errorf("%q: %w", t, ErrNoPrimaryKey)
+		}
+
 		cname, free := cstr(t)
 		rc := C.sqlite3session_attach(s.s, cname)
 		free()
 		if rc != rcOK {
 			return fmt.Errorf("sqlite3session_attach(%q): rc=%d", t, rc)
 		}
-		if err := s.classify([]string{t}); err != nil {
-			return err
-		}
+		s.tracked = append(s.tracked, t)
 	}
 	return nil
 }

@@ -294,3 +294,37 @@ func TestStartSessionOnClosedDatabaseFailsUnchanged(t *testing.T) {
 		t.Error("StartSession on a closed database returned no error")
 	}
 }
+
+// TestNamedKeylessTableIsRejected covers the second review finding. Naming a
+// keyless table is a request, so it has to fail rather than be reported and
+// quietly record nothing.
+func TestNamedKeylessTableIsRejected(t *testing.T) {
+	db := openDB(t, accountsDDL, notesDDL)
+
+	if _, err := db.StartSession("notes"); !errors.Is(err, sqlitesession.ErrNoPrimaryKey) {
+		t.Errorf(`StartSession("notes") = %v, want ErrNoPrimaryKey`, err)
+	}
+	if _, err := db.StartSession("no_such_table"); err == nil {
+		t.Error("StartSession on a missing table returned no error")
+	} else if errors.Is(err, sqlitesession.ErrNoPrimaryKey) {
+		t.Errorf("a missing table was reported as keyless: %v", err)
+	}
+}
+
+// TestAttachAllStillReportsKeylessTables keeps the half of the behaviour that is
+// genuinely useful. With no names, a keyless table must not fail the session.
+func TestAttachAllStillReportsKeylessTables(t *testing.T) {
+	db := openDB(t, accountsDDL, notesDDL)
+	sess, err := db.StartSession()
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	defer sess.Close()
+
+	if got := sess.Tracked(); len(got) != 1 || got[0] != "accounts" {
+		t.Errorf("Tracked = %v, want [accounts]", got)
+	}
+	if got := sess.Untrackable(); len(got) != 1 {
+		t.Errorf("Untrackable = %v, want one entry", got)
+	}
+}
