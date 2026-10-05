@@ -1,0 +1,9 @@
+{
+  "database": {
+    "path": "tandem.db"
+  },
+  "bridge": {
+    "enabled": false,
+    "target_url": ""
+  }
+}
