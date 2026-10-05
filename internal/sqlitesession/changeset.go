@@ -70,10 +70,9 @@ import (
 	"unsafe"
 )
 
-// Changeset packages everything recorded so far. Unlike a patchset it carries
-// enough old values to be inverted, which is what lets the receiving side detect
-// a data conflict rather than silently overwriting.
-// Changeset returns everything recorded since the session started.
+// Changeset returns everything recorded since the session started. Unlike a
+// patchset it carries enough old values to be inverted, which is what lets the
+// receiving side detect a data conflict rather than silently overwriting.
 //
 // It does not reset the session. Calling it twice returns the same accumulated
 // changes both times, not an increment, so a caller that wants successive

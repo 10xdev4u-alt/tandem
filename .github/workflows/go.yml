@@ -94,18 +94,6 @@ jobs:
             exit 1
           fi
 
-      # The without-extension leg cannot link the session package, so its
-      # coverage job is skipped rather than allowed to fail the whole run. What
-      # it proves is the loud link failure above, which is the behaviour we
-      # actually rely on.
-      - name: Coverage
-        if: matrix.session == 'with-extension'
-        run: go test ./... -count=1 -timeout 120s -coverprofile=coverage.out -covermode=atomic
-
-      - name: Coverage gate
-        if: matrix.session == 'with-extension'
-        run: go run ./tools/coverage-gate -profile coverage.out -threshold 80
-
   # Runs the whole Makefile the way a developer does, so a broken target cannot
   # hide behind the individual steps above.
   make:

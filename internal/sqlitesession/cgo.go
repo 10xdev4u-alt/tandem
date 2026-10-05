@@ -204,8 +204,15 @@ type stmt struct{ s *C.sqlite3_stmt }
 
 func (d *DB) prepare(sql *C.char) (*stmt, error) {
 	var h *C.sqlite3_stmt
-	if rc := C.sqlite3_prepare_v2(d.h, sql, prepareTail, &h, nil); rc != rcOK || h == nil {
-		return nil, fmt.Errorf("preparing %s: %s", C.GoString(sql), d.errMessage())
+	rc := C.sqlite3_prepare_v2(d.h, sql, prepareTail, &h, nil)
+	if rc != rcOK {
+		return nil, fmt.Errorf("preparing %s: rc=%d: %s", C.GoString(sql), rc, d.errMessage())
+	}
+	if h == nil {
+		// SQLite reports success with no statement at all for input holding only
+		// whitespace or a comment. Folding that into the error above made the
+		// message read "not an error", which is true and useless.
+		return nil, fmt.Errorf("no statement to run in %q", C.GoString(sql))
 	}
 	return &stmt{s: h}, nil
 }
@@ -373,7 +380,7 @@ func (d *DB) Exec(sql string) error {
 	case rcOK, rcDone:
 		return nil
 	default:
-		return fmt.Errorf("running %s: %s", sql, d.errMessage())
+		return fmt.Errorf("running %s: rc=%d: %s", sql, rc, d.errMessage())
 	}
 }
 
