@@ -35,6 +35,8 @@ package sqlitesession
 // extern int   sqlite3_step(sqlite3_stmt*);
 // extern int   sqlite3_finalize(sqlite3_stmt*);
 // extern long long sqlite3_column_int64(sqlite3_stmt*, int);
+// extern int   sqlite3_bind_text(sqlite3_stmt*, int, const char*, int, void*);
+// extern const unsigned char* sqlite3_column_text(sqlite3_stmt*, int);
 // extern void  sqlite3_free(void*);
 // extern void* sqlite3_malloc64(int64_t);
 //
@@ -57,6 +59,7 @@ package sqlitesession
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"unsafe"
@@ -66,6 +69,7 @@ import (
 const (
 	rcOK          = 0
 	rcRow         = 100
+	rcDone        = 101
 	openReadWrite = 0x00000002
 	openCreate    = 0x00000004
 	prepareTail   = -1
@@ -178,4 +182,126 @@ func (d *DB) SessionEnabled() (bool, error) {
 		return false, err
 	}
 	return v == 1, nil
+}
+
+// stmt is a prepared statement with the small surface this package needs.
+type stmt struct{ s *C.sqlite3_stmt }
+
+func (d *DB) prepare(sql *C.char) (*stmt, error) {
+	var h *C.sqlite3_stmt
+	if rc := C.sqlite3_prepare_v2(d.h, sql, prepareTail, &h, nil); rc != rcOK || h == nil {
+		return nil, fmt.Errorf("prepare: rc=%d", rc)
+	}
+	return &stmt{s: h}, nil
+}
+
+func (st *stmt) bindText(i int, v *C.char) error {
+	if rc := C.sqlite3_bind_text(st.s, C.int(i), v, -1, nil); rc != rcOK {
+		return fmt.Errorf("bind_text(%d): rc=%d", i, rc)
+	}
+	return nil
+}
+
+func (st *stmt) step() C.int       { return C.sqlite3_step(st.s) }
+func (st *stmt) int64(i int) int64 { return int64(C.sqlite3_column_int64(st.s, C.int(i))) }
+
+func (st *stmt) text(i int) string {
+	p := C.sqlite3_column_text(st.s, C.int(i))
+	if p == nil {
+		return ""
+	}
+	return C.GoString((*C.char)(unsafe.Pointer(p)))
+}
+
+// queryStrings runs a text query and collects every row's first column.
+func (d *DB) queryStrings(sql string) ([]string, error) {
+	csql, free := cstr(sql)
+	defer free()
+
+	st, err := d.prepare(csql)
+	if err != nil {
+		return nil, err
+	}
+	defer st.finalize()
+
+	var out []string
+	for {
+		rc := st.step()
+		if rc == rcDone {
+			return out, nil
+		}
+		if rc != rcRow {
+			return nil, fmt.Errorf("step %q: rc=%d", sql, rc)
+		}
+		out = append(out, st.text(0))
+	}
+}
+func (st *stmt) finalize() { C.sqlite3_finalize(st.s) }
+
+// queryInt64 runs a single integer query, optionally binding one text argument.
+func (d *DB) queryInt64(sql string, arg string) (int64, error) {
+	csql, freeSQL := cstr(sql)
+	defer freeSQL()
+
+	var cargs *C.char
+	if arg != "" {
+		var freeArg func()
+		cargs, freeArg = cstr(arg)
+		defer freeArg()
+	}
+
+	st, err := d.prepare(csql)
+	if err != nil {
+		return 0, err
+	}
+	defer st.finalize()
+
+	if cargs != nil {
+		if err := st.bindText(1, cargs); err != nil {
+			return 0, err
+		}
+	}
+	if rc := st.step(); rc != rcRow {
+		return 0, fmt.Errorf("step %q: rc=%d", sql, rc)
+	}
+	return st.int64(0), nil
+}
+
+// HasPrimaryKey reports whether a table has an explicitly declared PRIMARY KEY.
+//
+// SQLite records changes only for tables that do, and its own behaviour is to
+// attach such a table and then record nothing for it. That looks identical to a
+// table that simply received no writes, so Tandem asks rather than assumes.
+func (d *DB) HasPrimaryKey(table string) (bool, error) {
+	if table == "" {
+		return false, errors.New("empty table name")
+	}
+	n, err := d.queryInt64(
+		`SELECT EXISTS(SELECT 1 FROM pragma_table_info(?) WHERE pk > 0)`, table)
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// TableNames lists user tables in the main schema.
+func (d *DB) TableNames() ([]string, error) {
+	rows, err := d.queryStrings(
+		`SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// cbytes copies a Go byte slice onto SQLite's heap so a C call may read it.
+// cgo forbids passing Go pointers into C, so the data has to live on the C side.
+func cbytes(b []byte) (unsafe.Pointer, func()) {
+	p := C.sqlite3_malloc64(C.int64_t(len(b)))
+	if p == nil {
+		return nil, func() {}
+	}
+	buf := unsafe.Slice((*byte)(p), len(b))
+	copy(buf, b)
+	return p, func() { C.sqlite3_free(p) }
 }
