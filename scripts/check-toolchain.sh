@@ -45,13 +45,23 @@ check_go() {
   found="$(go env GOVERSION 2>/dev/null || echo missing)"
   found="${found#go}"
   report golang "$want" "${found:-missing}"
-  # A prefix match on want, followed by any single character. This box reports
-  # go1.27.0-X:nodwarf5, so a suffix beginning with "." would never match and the
-  # check would fail against the exact version it pins. Any single character is
-  # enough to tell 1.27.0-X from a different 1.27.01.
-  case "$found" in
-    "$want"|"$want"?*) ;;
-    *) status=1 ;;
+  # A two component pin is a minor line and matches any patch in it, which is
+  # what go.mod actually declares. A three component pin is exact apart from
+  # build metadata, so go1.27.0-X:nodwarf5 satisfies a pin of 1.27.0 while a
+  # 1.27.01 does not.
+  case "$want" in
+    *.*.*)
+      case "$found" in
+        "$want"|"$want"?*) ;;
+        *) status=1 ;;
+      esac
+      ;;
+    *)
+      case "$found" in
+        "$want"|"$want".*) ;;
+        *) status=1 ;;
+      esac
+      ;;
   esac
 }
 

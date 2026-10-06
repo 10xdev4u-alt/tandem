@@ -9,6 +9,11 @@
 # Verified by "make toolchain", which compares these pins against what is
 # actually installed.
 
-golang  1.27.0
+# Go is pinned to the minor line, not to a patch. go.mod declares "go 1.27",
+# which is a language version and a compatibility floor, and setup-go resolves it
+# to the newest 1.27.x rather than to one patch. Claiming 1.27.0 here would state
+# a precision that nothing actually enforces, and this file is meant to be
+# believed.
+golang  1.27
 nodejs  26.7.0
 bun     1.3.13
