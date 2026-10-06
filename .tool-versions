@@ -1,0 +1,19 @@
+# Toolchain pins for tools that mise manages.
+#
+# This file is read by mise, so it must only name tools mise can resolve.
+# Naming one it cannot, such as psql, makes mise emit a warning on every
+# single command run in this directory, which is worse than not pinning it.
+# Database client versions are therefore recorded separately, in
+# .db-versions, and verified by the same script.
+#
+# Verified by "make toolchain", which compares these pins against what is
+# actually installed.
+
+# Go is pinned to the minor line, not to a patch. go.mod declares "go 1.27",
+# which is a language version and a compatibility floor, and setup-go resolves it
+# to the newest 1.27.x rather than to one patch. Claiming 1.27.0 here would state
+# a precision that nothing actually enforces, and this file is meant to be
+# believed.
+golang  1.27
+nodejs  26.7.0
+bun     1.3.13
