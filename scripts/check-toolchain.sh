@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Compares the installed toolchain against .tool-versions and reports every
+# mismatch at once rather than the first one.
+#
+# Reporting all of them is deliberate. Fixing one version at a time, with a
+# fresh CI run between each, is the slow way to discover that three things
+# disagree.
+set -uo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Two files on purpose. .tool-versions is read by mise and may only name tools
+# mise can resolve; the database clients are recorded apart from it so that
+# pinning them does not make mise warn on every command run here.
+mise_pins="$root/.tool-versions"
+db_pins="$root/.db-versions"
+
+for f in "$mise_pins" "$db_pins"; do
+  if [ ! -f "$f" ]; then
+    echo "error: $f is missing, so its tools are unpinned" >&2
+    exit 2
+  fi
+done
+
+status=0
+report() { printf '  %-9s pinned %-10s found %s\n' "$1" "$2" "$3"; }
+
+# golang is pinned with a patch component while "go version" prints
+# "go version go1.27.0 linux/amd64", so it is matched by prefix.
+check_go() {
+  local want found
+  want="$(awk '$1=="golang"{print $2}' "$mise_pins" "$db_pins")"
+  found="$(go env GOVERSION 2>/dev/null || echo missing)"
+  found="${found#go}"
+  report golang "$want" "${found:-missing}"
+  # A prefix match on want, followed by any single character. This box reports
+  # go1.27.0-X:nodwarf5, so a suffix beginning with "." would never match and the
+  # check would fail against the exact version it pins. Any single character is
+  # enough to tell 1.27.0-X from a different 1.27.01.
+  case "$found" in
+    "$want"|"$want"?*) ;;
+    *) status=1 ;;
+  esac
+}
+
+# The pin name and the binary name differ, asdf calls Node "nodejs" while the
+# binary is "node". Keeping them in one place stops the file being read by a
+# human and the check being run by a machine from disagreeing.
+check_simple() {
+  local pin="$1" bin="$2" flag="${3:---version}" want found
+  want="$(awk -v t="$pin" '$1==t{print $2}' "$mise_pins" "$db_pins")"
+  if [ -z "$want" ]; then
+    report "$pin" "(unpinned)" "-"
+    return 1
+  fi
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    report "$pin" "$want" "not installed"
+    return 1
+  fi
+  # Two components as well as three, because psql reports "PostgreSQL 18.6"
+  # and a three component match would silently never fire for it.
+  # stderr is dropped on purpose. The node and bun binaries here are mise shims,
+  # and a shim prints its own warnings there. Reading 2>&1 let a warning line
+  # become the reported version, which is how psql's number ended up reported
+  # against node.
+  found="$("$bin" $flag 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
+  report "$pin" "$want" "${found:-unknown}"
+  [ "$found" = "$want" ]
+}
+
+echo "toolchain check (.tool-versions for mise tools, .db-versions for clients)"
+check_go || status=1
+check_simple nodejs node --version || status=1
+check_simple bun bun --version || status=1
+check_simple sqlite3 sqlite3 --version || status=1
+check_simple psql psql --version || status=1
+
+if [ "$status" -eq 0 ]; then
+  echo "all tools match .tool-versions"
+else
+  echo "mismatch: install the pinned versions, or update .tool-versions deliberately" >&2
+fi
+exit "$status"

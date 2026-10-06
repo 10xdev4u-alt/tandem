@@ -43,9 +43,24 @@ jobs:
         with:
           persist-credentials: false
 
+      # mise resolves the versions in .tool-versions, so CI uses the same
+      # toolchain the pins name instead of whatever the runner image ships.
+      # setup-go is still used for the toolchain cache, because that is what
+      # makes this loop tolerable.
+      - uses: setup-node@v4
+        with:
+          node-version-file: .tool-versions
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Toolchain matches the pins
+        run: |
+          if command -v mise >/dev/null 2>&1; then
+            mise install
+          fi
+          ./scripts/check-toolchain.sh
 
       - name: Set CGO_CFLAGS for this leg
         run: echo "CGO_CFLAGS=${{ matrix.cflags }}" >> "$GITHUB_ENV"

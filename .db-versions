@@ -1,0 +1,15 @@
+# Database client versions, recorded but not mise managed.
+#
+# Every measurement in ADR 0001 cites a SQLite version, and a measurement
+# nobody can reproduce is a number nobody should trust. Postgres is here for
+# the day the bridge has a real target.
+#
+# These live apart from .tool-versions because mise cannot resolve psql, and
+# naming an unresolvable tool there makes mise warn on every command in this
+# directory.
+#
+# CI does not run either of these yet. They are pinned so that when it does,
+# the version is decided rather than discovered.
+
+sqlite3 3.53.4
+psql    18.6

@@ -25,7 +25,7 @@ CONFIG  := config.json
 # The gate lives here rather than in a workflow string so it can be argued with.
 COVERAGE_THRESHOLD ?= 80
 
-.PHONY: all build test vet fmt fmt-check check coverage run tidy clean help
+.PHONY: all build test vet fmt fmt-check check coverage toolchain run tidy clean help
 
 all: check build
 
@@ -53,7 +53,7 @@ fmt-check:
 	fi
 
 ## check: everything CI should run
-check: fmt-check vet test
+check: fmt-check vet toolchain test
 
 ## run: build and start the daemon against config.json
 run: build
@@ -70,6 +70,10 @@ clean:
 ## help: list targets
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## /  /'
+
+## toolchain: compare installed tools against the pinned versions
+toolchain:
+	@./scripts/check-toolchain.sh
 
 ## coverage: report and gate total coverage
 coverage:
