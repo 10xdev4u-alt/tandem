@@ -42,6 +42,13 @@ wanted() {
 check_go() {
   local want found
   want="$(awk '$1=="golang"{print $2}' "$mise_pins" "$db_pins")"
+  if [ -z "$want" ]; then
+    # Without this the patterns below degenerate to ?*, which matches any
+    # nonempty version, so dropping the pin would make the check pass for every
+    # possible Go. A pin file with no Go entry must be an error, not a pass.
+    report golang "(unpinned)" "-"
+    return 1
+  fi
   found="$(go env GOVERSION 2>/dev/null || echo missing)"
   found="${found#go}"
   report golang "$want" "${found:-missing}"
