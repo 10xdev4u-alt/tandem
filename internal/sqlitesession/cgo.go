@@ -51,7 +51,6 @@ extern void* sqlite3_malloc64(int64_t);
 
 extern int   sqlite3session_create(sqlite3*, const char*, sqlite3_session**);
 extern int   sqlite3session_attach(sqlite3_session*, const char*);
-extern int   sqlite3session_enable(sqlite3_session*, int);
 extern int   sqlite3session_isempty(sqlite3_session*);
 extern int   sqlite3session_changeset(sqlite3_session*, int*, void**);
 extern int   sqlite3session_patchset(sqlite3_session*, int*, void**);

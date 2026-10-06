@@ -4,6 +4,8 @@
 - Date: 2026-10-03
 - Issue: #14
 - Supersedes: nothing
+- Amended: 2026-10-06, see the amendment at the end of this record
+- Amended: 2026-10-06, see "Amendment, 2026-10-06" at the end
 
 ## Context
 
@@ -235,3 +237,118 @@ confirm the gate is wired rather than decorative.
 
 Both probes are committed and both are what produced every number above.
 
+
+## Amendment, 2026-10-06: what building the binding disproved
+
+The decision above stands. Vendoring mattn was the right call and every number
+in this record still holds. But writing the binding in issue 17 contradicted two
+assumptions in the text above, and one of them had been carrying an argument.
+
+An accepted record is amended rather than rewritten, so the original reasoning
+stays readable next to the correction.
+
+### The session flags cannot be set per package
+
+The `Decision` section says to build with
+`CGO_CFLAGS="-DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK"`. It does
+not say *where*, and the natural reading is that a `#cgo CFLAGS` directive in
+our own package file would do it.
+
+It would not. A `#cgo CFLAGS` directive applies only to the cgo compilation unit
+that declares it. Our package has one; the SQLite amalgamation is compiled
+inside mattn's package and has its own. A directive in our file was sitting
+there doing nothing at all, and it looked like it was working, because the file
+that declared the flags was the file that used the session API.
+
+So the flags are a property of the whole program, set at link time. They are
+written down in two places: `CGO_CFLAGS` at the top of the `Makefile`, which is
+what a developer or a build reads, and both legs of the CI matrix in
+`.github/workflows/go.yml`.
+
+The Makefile only supplies them. The matrix is what defends the requirement,
+because one leg runs the build without them and requires the link to *fail*.
+That leg is the only thing standing between "the flags are documented" and
+"the flags are actually necessary", and it is why the directive at
+`internal/sqlitesession/cgo.go:21` is not being relied on.
+
+Without them the link fails on `sqlite3session_attach`. That is the good version
+of this problem, and the CI leg exists to keep it that way.
+
+### We own the connection; we do not wrap mattn's
+
+The Consequences section says the binding is "roughly sixty lines" and speaks of
+"a binding we wrote" without saying what it wraps. The implicit assumption
+throughout was that we could reach mattn's `sqlite3*` handle and drive a session
+against its connection.
+
+We cannot. mattn keeps the handle unexported and its pull request adding an
+accessor has been open about eighteen months.
+
+So the binding does something less comfortable than wrapping. It imports mattn
+for the side effect of linking its amalgamation, declares the handful of
+`sqlite3session_*` and `sqlite3changeset_*` entry points it needs as `extern`,
+and opens its own `sqlite3` handle. Two connections exist in one process, and a
+session belongs to the connection it was created on.
+
+That last sentence is a real constraint, not a footnote. A write through any
+other handle on that database is invisible to the session, so the daemon has to
+funnel writes through the session's own connection rather than pooling. That is
+issue 2 and it is why the bridge is not yet wired.
+
+This correction removes most of the cost that justified the "roughly sixty lines"
+framing. Forking was the thing we were avoiding by choosing mattn, and we are
+still not forking it. But we are now coupled to another package's C symbols
+rather than only to its API.
+
+### The coupling is fragile, and it fails loudly
+
+`internal/sqlitesession` declares C functions it does not define. They resolve at
+final link against object files mattn already compiled. Nothing checks that
+dependency at compile time, so it is worth stating what happens if it breaks.
+
+If those symbols are absent, the build fails at link time with
+`undefined reference to sqlite3session_attach`. It cannot fail silently and it
+cannot produce a binary that starts and then records nothing. That is the one
+genuinely good property of this arrangement and it is why it is acceptable.
+
+The failure mode to watch for is subtler: mattn changing how it compiles the
+amalgamation, for instance turning on `SQLITE_ENABLE_SESSION` itself, which
+would make the flags unnecessary and silently invalidate the story in this
+document. The CI leg that requires the link to *fail* without the flags is what
+catches that. A build matrix that only tested the passing configuration would
+have let it happen and nothing would have noticed.
+
+### Not an ADR correction, but it belongs here
+
+Allocating a string with `C.CString` and freeing it with `sqlite3_free` aborts
+the process. mattn's amalgamation installs allocator hooks, and a pointer from
+Go's allocator is not one SQLite may free. Every string crossing into SQLite goes
+through `sqlite3_malloc64` instead.
+
+This is not a decision that needed recording, it is a bug that cost an afternoon.
+It is here because the same trap applies to any future binding code, and because
+the symptom is an abort with no message rather than anything recognisable.
+
+### Also learned, for whoever reads this next
+
+Three things that are not amendments but were not known when the spikes ran.
+
+`sqlite3changeset_op` cannot be used to inspect a changeset. It reported a
+primary key count of 18 for a single column primary key, then faulted on the
+second step. The out-parameter layout is not what the documentation describes on
+SQLite 3.53.4, so there is no `Changes` iterator in the binding. Tests assert
+through round trips instead, which is stronger evidence anyway. Tracked as its
+own issue.
+
+A session cannot be inspected after its database is closed. `sqlite3_close` does
+not report `SQLITE_BUSY` for open sessions, so the connection was freed while
+live sessions still pointed at it, and deleting one afterwards was a use-after-
+free. Found in review of PR 96. `DB` now tracks its sessions and tears them down
+before releasing the handle.
+
+`sqlite3session_enable(sess, 1)` returns `SQLITE_ERROR` on 3.53.4 even though
+recording works, because sessions are enabled by default. The call is not made
+and the declaration is not left in the preamble either, since an `extern` for a
+function nothing calls implies the opposite. The tests assert that writes are
+actually recorded rather than trusting a return code, which is the property that
+matters.
