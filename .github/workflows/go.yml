@@ -1,0 +1,124 @@
+name: go
+
+# The session extension has to be compiled into the SQLite amalgamation, and a
+# per package #cgo CFLAGS directive cannot reach another package's C sources.
+# So the flags are a property of the whole program, which means the interesting
+# question in CI is not only "does it pass" but "does it pass in both builds".
+#
+# Both are matrix legs. A build without the extension must fail to link loudly
+# rather than silently record nothing, and a build with it must actually carry
+# it. Running only the passing leg would hide exactly the failure this project
+# was built to avoid.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+
+jobs:
+  test:
+    name: test (${{ matrix.session }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The flags are spelled out here rather than read from an env block
+          # because the env context is not available inside strategy. The
+          # without-extension leg has to carry an empty value rather than
+          # omitting the key, so the step that exports it runs for both legs.
+          - session: with-extension
+            cflags: -DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK
+          - session: without-extension
+            cflags: ''
+    steps:
+      # The pull_request workflow runs code from the pull request. Persisting
+      # the token in .git/config would put it within reach of that code, and
+      # nothing here needs an authenticated git operation.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set CGO_CFLAGS for this leg
+        run: echo "CGO_CFLAGS=${{ matrix.cflags }}" >> "$GITHUB_ENV"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build the daemon
+        if: matrix.session == 'with-extension'
+        run: go build -o "$RUNNER_TEMP/tandemd" ./cmd/tandemd
+
+      # The inverse, and the reason this leg exists.
+      #
+      # The check is on the session package's own test binary rather than on the
+      # daemon, because the daemon does not import sqlitesession yet. It opens a
+      # database through database/sql and asks about the compile option, so it
+      # links cleanly either way. Only something that actually references
+      # sqlite3session_* needs the flags, and that is the package whose
+      # degradation must never be silent.
+      #
+      # go build ./... does not link libraries at all, which is why an earlier
+      # version of this file appeared to pass while checking nothing.
+      - name: Linking must fail loudly without the extension
+        if: matrix.session == 'without-extension'
+        run: |
+          set +e
+          go test -run ZZZNoSuchTest ./internal/sqlitesession 2> "$RUNNER_TEMP/link.log"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "FATAL: the session package linked without the session extension."
+            echo "Either the flags leaked in, or something started compiling the"
+            echo "amalgamation with the extension on by default, which would make"
+            echo "the CGO_CFLAGS story in ADR 0001 wrong."
+            exit 1
+          fi
+          if ! grep -q "undefined reference" "$RUNNER_TEMP/link.log"; then
+            echo "the link failed, but not for the expected reason:"
+            cat "$RUNNER_TEMP/link.log"
+            exit 1
+          fi
+          echo "link failed as required, on the symbols that need the extension:"
+          grep -m3 "undefined reference" "$RUNNER_TEMP/link.log"
+
+      # The gate runs here, through the Makefile, so the threshold stays in one
+      # place. It was briefly absent from this file after an earlier edit and
+      # nothing noticed, which is exactly what this step is for.
+      - name: Coverage, gated by COVERAGE_THRESHOLD
+        if: matrix.session == 'with-extension'
+        run: make coverage
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  # Runs the whole Makefile the way a developer does, so a broken target cannot
+  # hide behind the individual steps above.
+  make:
+    name: make check
+    runs-on: ubuntu-latest
+    steps:
+      # The pull_request workflow runs code from the pull request. Persisting
+      # the token in .git/config would put it within reach of that code, and
+      # nothing here needs an authenticated git operation.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make check

@@ -22,7 +22,10 @@ LDFLAGS := -X $(PKG).Commit=$(COMMIT)
 BIN     := bin/tandemd
 CONFIG  := config.json
 
-.PHONY: all build test vet fmt fmt-check check run tidy clean help
+# The gate lives here rather than in a workflow string so it can be argued with.
+COVERAGE_THRESHOLD ?= 80
+
+.PHONY: all build test vet fmt fmt-check check coverage run tidy clean help
 
 all: check build
 
@@ -67,3 +70,8 @@ clean:
 ## help: list targets
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## /  /'
+
+## coverage: report and gate total coverage
+coverage:
+	go test ./... -count=1 -timeout 120s -coverprofile=coverage.out -covermode=atomic
+	go run ./tools/coverage-gate -profile coverage.out -threshold $(COVERAGE_THRESHOLD)

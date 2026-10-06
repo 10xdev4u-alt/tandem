@@ -70,9 +70,15 @@ import (
 	"unsafe"
 )
 
-// Changeset packages everything recorded so far. Unlike a patchset it carries
-// enough old values to be inverted, which is what lets the receiving side detect
-// a data conflict rather than silently overwriting.
+// Changeset returns everything recorded since the session started. Unlike a
+// patchset it carries enough old values to be inverted, which is what lets the
+// receiving side detect a data conflict rather than silently overwriting.
+//
+// It does not reset the session. Calling it twice returns the same accumulated
+// changes both times, not an increment, so a caller that wants successive
+// batches must not assume each call is a delta. That is sqlite3session_changeset
+// behaviour rather than a choice here, and it is called out because the
+// alternative assumption is easy to make and quietly wrong.
 func (s *Session) Changeset() ([]byte, error) {
 	if s.closed || s.s == nil {
 		return nil, errors.New("session is closed")

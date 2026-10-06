@@ -199,3 +199,87 @@ func TestChangesetOnClosedSessionFails(t *testing.T) {
 		t.Error("Changeset on a closed session returned no error")
 	}
 }
+
+// TestConcatChangesetsProducesOneReplayableResult covers the reason concat
+// exists. Two changesets from two independent sources, applied as one unit, must
+// reach the same state as applying them separately. The bridge replays into a
+// single connection that may already be holding unapplied work from another
+// source, so a combined changeset has to stay replayable.
+func TestConcatChangesetsProducesOneReplayableResult(t *testing.T) {
+	// Two separate sources, so each changeset describes a distinct row. Using one
+	// session twice would not work: Changeset reports everything since the
+	// session started and does not reset, so the second call returns the first
+	// call's changes again rather than an increment.
+	alpha := record(t, accountsDDL, func(db *sqlitesession.DB) {
+		if err := db.Exec("INSERT INTO accounts VALUES (1, 'alpha', 100)"); err != nil {
+			t.Fatalf("alpha insert: %v", err)
+		}
+	})
+	beta := record(t, accountsDDL, func(db *sqlitesession.DB) {
+		if err := db.Exec("INSERT INTO accounts VALUES (2, 'beta', 200)"); err != nil {
+			t.Fatalf("beta insert: %v", err)
+		}
+	})
+
+	combined, err := sqlitesession.ConcatChangesets(alpha, beta)
+	if err != nil {
+		t.Fatalf("ConcatChangesets: %v", err)
+	}
+	if len(combined) == 0 {
+		t.Fatal("ConcatChangesets returned an empty changeset for two non-empty inputs")
+	}
+	if len(combined) <= len(alpha) && len(combined) <= len(beta) {
+		t.Error("the concatenated changeset is not larger than either input, " +
+			"so at least one of them was dropped")
+	}
+
+	dst := openDB(t, accountsDDL)
+	if err := dst.ApplyChangeset(combined); err != nil {
+		t.Fatalf("ApplyChangeset on the concatenated result: %v", err)
+	}
+	for _, tc := range []struct {
+		id   string
+		want int64
+	}{{"1", 100}, {"2", 200}} {
+		if got, err := dst.QueryInt64(`SELECT cents FROM accounts WHERE id = ` + tc.id); err != nil {
+			t.Errorf("query id=%s: %v", tc.id, err)
+		} else if got != tc.want {
+			t.Errorf("cents for id=%s = %d, want %d", tc.id, got, tc.want)
+		}
+	}
+}
+
+// TestConcatChangesetsPassesThroughEmptyInput pins the short circuits, so a
+// changeset with nothing in it does not cost an allocation or a copy.
+func TestConcatChangesetsPassesThroughEmptyInput(t *testing.T) {
+	only := record(t, accountsDDL, func(db *sqlitesession.DB) {
+		if err := db.Exec("INSERT INTO accounts VALUES (1, 'a', 100)"); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		a, b []byte
+	}{
+		{"both empty", nil, nil},
+		{"first empty", nil, only},
+		{"second empty", only, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := sqlitesession.ConcatChangesets(tc.a, tc.b)
+			if err != nil {
+				t.Fatalf("ConcatChangesets: %v", err)
+			}
+			if tc.a == nil && tc.b == nil {
+				if len(got) != 0 {
+					t.Errorf("got %d bytes, want empty", len(got))
+				}
+				return
+			}
+			if len(got) != len(only) {
+				t.Errorf("got %d bytes, want the non-empty input verbatim (%d)", len(got), len(only))
+			}
+		})
+	}
+}
