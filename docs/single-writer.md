@@ -40,14 +40,26 @@ so a capture session is permanently reading. Under the default journal that
 reader and the application contend, and writes start failing with
 `database is locked`. Under WAL the capture session and the application coexist.
 
-This is also why the bridge has to funnel writes rather than pool them. Two
-writers still serialise, in WAL as much as in rollback mode, so "we have WAL now
-so let's add a second writer pool" is not a thing that works. One writer, many
-readers, and every write deliberately funnelled through it.
+That is what WAL buys, and it is worth keeping separate from two things it is
+often confused with.
 
-The session binding in `internal/sqlitesession` adds a further constraint on
-top of this, which is why a session belongs to the connection that created it.
-That is recorded in the amendment to ADR 0001.
+**Sequential writes are not affected either way.** SQLite permits many
+connections and separate writes still succeed one after another, including from
+different processes on the same host. The limit is on writes being *in progress
+at the same time*, not on there being more than one writer. The demo uses two
+connections in one process and holds one transaction open on purpose, because
+that is the only shape that shows anything.
+
+**The bridge funnels writes for a different reason.** Writes do not have to be
+routed through the session-owning connection because SQLite forbids two
+concurrent writers. They have to be routed there because a session only sees
+changes made through the connection it was created on. A write through any other
+handle on the same file is invisible to it, silently. That constraint comes from
+the session extension, not from the locking model, and it is recorded in the
+amendment to ADR 0001.
+
+So "we have WAL now, so let us add a second writer pool" fails for two unrelated
+reasons, and only one of them is about WAL.
 
 ## This cannot rot
 

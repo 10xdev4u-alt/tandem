@@ -24,11 +24,12 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
 // open returns a single-connection handle. One connection per handle is the
@@ -51,7 +52,12 @@ func open(path string) (*sql.DB, error) {
 }
 
 // collide holds a read transaction on reader and then attempts a write from
-// writer. It returns the writer's error, or nil if the write succeeded.
+// writer.
+//
+// A setup or read failure is returned as a plain error and must never be read as
+// the writer being refused. Returning every failure through one channel meant a
+// broken database would look exactly like a correct demonstration, which is the
+// one thing a demonstration must not do.
 func collide(reader, writer *sql.DB) error {
 	tx, err := reader.Begin()
 	if err != nil {
@@ -66,8 +72,27 @@ func collide(reader, writer *sql.DB) error {
 		return fmt.Errorf("reading: %w", err)
 	}
 
-	_, err = writer.Exec(`INSERT INTO accounts (id, owner) VALUES (2, 'writer')`)
-	return err
+	if _, err := writer.Exec(`INSERT INTO accounts (id, owner) VALUES (2, 'writer')`); err != nil {
+		if isBusy(err) {
+			return errBusy
+		}
+		return fmt.Errorf("writing: %w", err)
+	}
+	return nil
+}
+
+// errBusy marks the one failure this demonstration is trying to produce. It is
+// distinct from every other error so that "the writer was refused" cannot be
+// confused with "something went wrong".
+var errBusy = errors.New("writer refused with SQLITE_BUSY")
+
+// isBusy reports whether err is SQLite refusing for lock contention.
+func isBusy(err error) bool {
+	var serr sqlite3.Error
+	if errors.As(err, &serr) {
+		return serr.Code == sqlite3.ErrBusy || serr.ExtendedCode == sqlite3.ErrBusySnapshot
+	}
+	return false
 }
 
 // scenario runs one configuration and reports the journal mode alongside the
@@ -109,10 +134,14 @@ func scenario(dir, label, journal string) error {
 
 	fmt.Printf("\n%s\n", label)
 	fmt.Printf("  journal_mode : %s\n", mode)
-	if writeErr != nil {
+	switch {
+	case errors.Is(writeErr, errBusy):
 		fmt.Printf("  reader holds a transaction, writer tries to write\n")
-		fmt.Printf("  result       : refused (%v)\n", writeErr)
-	} else {
+		fmt.Printf("  result       : refused with SQLITE_BUSY, as claimed\n")
+	case writeErr != nil:
+		fmt.Printf("  reader holds a transaction, writer tries to write\n")
+		fmt.Printf("  result       : the run failed, which is not a demonstration (%v)\n", writeErr)
+	default:
 		fmt.Printf("  reader holds a transaction, writer tries to write\n")
 		fmt.Printf("  result       : the write went through\n")
 	}
@@ -134,8 +163,12 @@ func run() error {
 	}
 	defer os.RemoveAll(dir)
 
-	fmt.Println("SQLite single writer: two connections, one database")
+	fmt.Println("SQLite single writer: two connections in one process, one database")
 	fmt.Println("A reader holds a transaction open while a second connection writes.")
+	fmt.Println()
+	fmt.Println("Both connections are deliberate. Separate writes succeed fine, in any")
+	fmt.Println("journal mode, so nothing is being demonstrated unless one transaction")
+	fmt.Println("is held open while the other connection tries to write.")
 
 	rollbackErr := scenario(dir, "rollback journal (SQLite's default)", "DELETE")
 	walErr := scenario(dir, "write ahead log", "WAL")
@@ -146,12 +179,17 @@ func run() error {
 	fmt.Println("  blocking the writer, which is the case change capture needs.")
 	fmt.Println("  Two concurrent writers still serialise in WAL as well.")
 
-	if rollbackErr == nil {
+	if !errors.Is(rollbackErr, errBusy) {
 		fmt.Println()
-		fmt.Println("FAILED: the default journal let a writer through while a reader held a")
-		fmt.Println("transaction. That is not supposed to happen and this file would be")
-		fmt.Println("claiming something false.")
-		return fmt.Errorf("rollback journal did not block the writer")
+		if rollbackErr == nil {
+			fmt.Println("FAILED: the default journal let a writer through while a reader held a")
+			fmt.Println("transaction. That is not supposed to happen and this file would be")
+			fmt.Println("claiming something false.")
+			return fmt.Errorf("rollback journal did not block the writer")
+		}
+		fmt.Println("FAILED: the rollback run did not produce a lock error, so it demonstrated")
+		fmt.Println("nothing. A run that fails for any other reason is not evidence.")
+		return fmt.Errorf("rollback run failed without SQLITE_BUSY: %w", rollbackErr)
 	}
 	if walErr != nil {
 		fmt.Println()

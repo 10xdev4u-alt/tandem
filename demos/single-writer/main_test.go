@@ -2,8 +2,11 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
+
+	"github.com/mattn/go-sqlite3"
 )
 
 // TestRunDemonstratesBothOutcomes is the reason this file is not just a demo.
@@ -24,19 +27,42 @@ func TestRunDemonstratesBothOutcomes(t *testing.T) {
 func TestCollideRefusesInRollbackAndAllowsInWAL(t *testing.T) {
 	dir := t.TempDir()
 
-	t.Run("rollback journal refuses the writer", func(t *testing.T) {
+	t.Run("rollback journal refuses the writer with SQLITE_BUSY", func(t *testing.T) {
 		reader, writer := setup(t, dir, "rollback", "DELETE")
-		if err := collide(reader, writer); err == nil {
-			t.Fatal("the default journal let a writer through while a reader held a transaction")
-		} else {
-			t.Logf("refused as claimed: %v", err)
+		err := collide(reader, writer)
+		if !errors.Is(err, errBusy) {
+			t.Fatalf("want errBusy, got %v", err)
 		}
+		t.Logf("refused as claimed: %v", err)
 	})
 
 	t.Run("wal allows the writer", func(t *testing.T) {
 		reader, writer := setup(t, dir, "wal", "WAL")
 		if err := collide(reader, writer); err != nil {
 			t.Fatalf("WAL blocked a writer while a reader held a transaction: %v", err)
+		}
+	})
+
+	t.Run("a read failure is not mistaken for a refusal", func(t *testing.T) {
+		// The hole this guards. If every error came back through one channel then
+		// a database that could not be read would look exactly like the writer
+		// being refused, and the command would report success while proving
+		// nothing at all.
+		if isBusy(errors.New("no such table: accounts")) {
+			t.Error("a plain error was treated as lock contention")
+		}
+		// Wrapped, because callers see these errors through a chain. The chain is
+		// built by hand rather than with fmt.Errorf("%w") because vet rejects a
+		// %w operand whose pointer type would defeat errors.Is, and this is
+		// testing the traversal rather than the formatting.
+		// A value, not a pointer, because that is what the driver returns.
+		// errors.As matches the target type exactly, so guessing wrong here
+		// would make the assertion pass for no reason while the real path failed.
+		if !isBusy(wrapped{sqlite3.Error{Code: sqlite3.ErrBusy}}) {
+			t.Error("isBusy did not see a wrapped SQLITE_BUSY")
+		}
+		if !isBusy(sqlite3.Error{Code: sqlite3.ErrBusy}) {
+			t.Error("isBusy missed SQLITE_BUSY")
 		}
 	})
 
@@ -90,3 +116,10 @@ func setup(t *testing.T, dir, name, journal string) (reader, writer *sql.DB) {
 	t.Cleanup(func() { r.Close(); w.Close() })
 	return r, w
 }
+
+// wrapped adds a layer of context to an error, the way callers do, so the
+// unwrapping behaviour of isBusy can be tested.
+type wrapped struct{ inner error }
+
+func (w wrapped) Error() string { return "writing: " + w.inner.Error() }
+func (w wrapped) Unwrap() error { return w.inner }
