@@ -87,6 +87,16 @@ if wanted bun; then check_simple bun bun --version || status=1; fi
 if wanted sqlite3; then check_simple sqlite3 sqlite3 --version || status=1; fi
 if wanted psql; then check_simple psql psql --version || status=1; fi
 
+# The workflow extracts these same two values to install node and bun, so an
+# unpinned or misspelled entry would otherwise show up as a confusing failure in
+# a setup action rather than here.
+node_pin="$(awk '$1=="nodejs"{print $2}' "$mise_pins")"
+bun_pin="$(awk '$1=="bun"{print $2}' "$mise_pins")"
+if [ -z "$node_pin" ] || [ -z "$bun_pin" ]; then
+  echo "error: .tool-versions must pin nodejs and bun, CI installs both from it" >&2
+  exit 2
+fi
+
 if [ ${#requested[@]} -gt 0 ]; then
   echo "checked: ${requested[*]}"
 else

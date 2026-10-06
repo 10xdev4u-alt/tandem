@@ -52,8 +52,10 @@ fmt-check:
 		echo "unformatted files:"; echo "$$unformatted"; exit 1; \
 	fi
 
-## check: everything CI should run
-check: fmt-check vet toolchain test
+## check: everything CI should run about the code
+##        deliberately excludes toolchain: that verifies the machine, and a
+##        build should not fail because it ran somewhere else
+check: fmt-check vet test
 
 ## run: build and start the daemon against config.json
 run: build

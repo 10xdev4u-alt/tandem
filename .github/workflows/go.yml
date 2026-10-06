@@ -43,20 +43,29 @@ jobs:
         with:
           persist-credentials: false
 
-      # Each tool is installed from the pin file rather than whatever the runner
-      # image happens to ship, which is the whole point of pinning them. There is
-      # no mise in the runner image, so the actions do the resolving.
+      # The pins are read here rather than handed to the setup actions as files.
+      # actions/setup-node took the first line of .tool-versions as the version,
+      # which was a comment, and installed nothing. Each action supporting a given
+      # file format is its own small thing to discover from a failed build, so the
+      # workflow extracts the values once and passes them explicitly.
+      - name: Read toolchain pins
+        id: pins
+        run: |
+          echo "node=$(awk '$1=="nodejs"{print $2}' .tool-versions)" >> "$GITHUB_OUTPUT"
+          echo "bun=$(awk '$1=="bun"{print $2}' .tool-versions)" >> "$GITHUB_OUTPUT"
+          echo "node_pin=$(awk '$1=="nodejs"{print $2}' .tool-versions)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
       - uses: actions/setup-node@v4
         with:
-          node-version-file: .tool-versions
+          node-version: ${{ steps.pins.outputs.node }}
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version-file: .tool-versions
+          bun-version: ${{ steps.pins.outputs.bun }}
 
       # Only the tools CI actually installs. A runner has no pinned psql and no
       # reason to have one, and a check that demands a tool the environment never
