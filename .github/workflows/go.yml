@@ -43,24 +43,26 @@ jobs:
         with:
           persist-credentials: false
 
-      # mise resolves the versions in .tool-versions, so CI uses the same
-      # toolchain the pins name instead of whatever the runner image ships.
-      # setup-go is still used for the toolchain cache, because that is what
-      # makes this loop tolerable.
-      - uses: setup-node@v4
-        with:
-          node-version-file: .tool-versions
-
+      # Each tool is installed from the pin file rather than whatever the runner
+      # image happens to ship, which is the whole point of pinning them. There is
+      # no mise in the runner image, so the actions do the resolving.
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .tool-versions
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .tool-versions
+
+      # Only the tools CI actually installs. A runner has no pinned psql and no
+      # reason to have one, and a check that demands a tool the environment never
+      # had fails for being correct.
       - name: Toolchain matches the pins
-        run: |
-          if command -v mise >/dev/null 2>&1; then
-            mise install
-          fi
-          ./scripts/check-toolchain.sh
+        run: ./scripts/check-toolchain.sh golang nodejs bun
 
       - name: Set CGO_CFLAGS for this leg
         run: echo "CGO_CFLAGS=${{ matrix.cflags }}" >> "$GITHUB_ENV"

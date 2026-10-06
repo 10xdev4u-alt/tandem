@@ -21,11 +21,24 @@ for f in "$mise_pins" "$db_pins"; do
   fi
 done
 
+# Tools named on the command line are the only ones checked. CI names the ones it
+# actually installs, because a runner image has no bun and no pinned psql, and a
+# check that demands a tool the environment never had would fail on being
+# correct. Locally the argument is empty, so everything is checked.
+requested=("$@")
+
 status=0
 report() { printf '  %-9s pinned %-10s found %s\n' "$1" "$2" "$3"; }
 
 # golang is pinned with a patch component while "go version" prints
 # "go version go1.27.0 linux/amd64", so it is matched by prefix.
+wanted() {
+  [ ${#requested[@]} -eq 0 ] && return 0
+  local t
+  for t in "${requested[@]}"; do [ "$t" = "$1" ] && return 0; done
+  return 1
+}
+
 check_go() {
   local want found
   want="$(awk '$1=="golang"{print $2}' "$mise_pins" "$db_pins")"
@@ -68,11 +81,17 @@ check_simple() {
 }
 
 echo "toolchain check (.tool-versions for mise tools, .db-versions for clients)"
-check_go || status=1
-check_simple nodejs node --version || status=1
-check_simple bun bun --version || status=1
-check_simple sqlite3 sqlite3 --version || status=1
-check_simple psql psql --version || status=1
+if wanted golang; then check_go || status=1; fi
+if wanted nodejs; then check_simple nodejs node --version || status=1; fi
+if wanted bun; then check_simple bun bun --version || status=1; fi
+if wanted sqlite3; then check_simple sqlite3 sqlite3 --version || status=1; fi
+if wanted psql; then check_simple psql psql --version || status=1; fi
+
+if [ ${#requested[@]} -gt 0 ]; then
+  echo "checked: ${requested[*]}"
+else
+  echo "checked: all pinned tools"
+fi
 
 if [ "$status" -eq 0 ]; then
   echo "all tools match .tool-versions"
