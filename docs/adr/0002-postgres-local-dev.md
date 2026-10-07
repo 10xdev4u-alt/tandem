@@ -23,16 +23,19 @@ $ dpkg -l | grep postgresql
 $ apt-cache policy postgresql
 ```
 
-All empty. No server, no listener, no package, and no way to install one
-non-interactively:
+All empty. No server, no listener, no package, and on **this machine** no way to
+install one non-interactively:
 
 ```
 $ sudo -n true
 sudo: a password is required
 ```
 
-So `apt-get install postgresql` is not something the build can run. That rules
-out the system package path for both CI and a fresh clone.
+That claim is about this box and nothing wider. It does not establish anything
+about CI: GitHub-hosted Linux runners are documented as providing passwordless
+sudo, and this spike never ran there, so "the build cannot apt-install
+Postgres" would have been a guess dressed as a measurement. The system package
+path is rejected below for reasons that hold regardless of who has sudo.
 
 Two other paths exist on this machine. Docker is running
 (`29.7.2`), and the network reaches both `proxy.golang.org` (200) and
@@ -45,6 +48,58 @@ Two other paths exist on this machine. Docker is running
 server and querying it with the pinned client rather than trusting the library's
 own handshake. A library that reported success without a server would have
 passed unnoticed otherwise.
+
+The whole spike was one program in a scratch directory, which is exactly why it
+belongs in this document: nothing in the repository runs it, so without the
+source here the numbers below are not reproducible by anyone else. It is
+reproduced in full.
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+
+	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
+)
+
+func main() {
+	const port = uint32(54329)
+
+	pg := embeddedpostgres.NewDatabase(embeddedpostgres.DefaultConfig().
+		Username("tandem").
+		Password("tandem").
+		Database("tandem").
+		Port(port).
+		Version(embeddedpostgres.PostgresVersion("18.6.0")))
+
+	if err := pg.Start(); err != nil {
+		fmt.Println("START FAILED:", err)
+		os.Exit(1)
+	}
+	defer pg.Stop()
+
+	// Verified through the pinned psql client rather than the library's own
+	// handshake. A library that reported success without a server would pass
+	// unnoticed otherwise, which is the whole reason for this line.
+	out, err := exec.Command("psql",
+		"host=127.0.0.1 port=54329 user=tandem password=tandem dbname=tandem",
+		"-tAc", "select version(), current_user;").CombinedOutput()
+	if err != nil {
+		fmt.Println("PSQL FAILED:", err, string(out))
+		os.Exit(1)
+	}
+	fmt.Println("PSQL OK:", string(out))
+	fmt.Println("SPIKE PASS")
+}
+```
+
+Run with `go run .` in a module containing only this file and
+`github.com/fergusstrange/embedded-postgres`. The first run substituted
+`embeddedpostgres.V18` for the version literal; that is the only difference
+between the two transcripts below.
 
 First run, using the library's `V18` constant:
 
@@ -93,8 +148,17 @@ a 18.3 server and nobody wrote that down.
 
 ## Alternatives rejected
 
-**System package via apt.** Requires a password for sudo. Not automatable, and a
-build that cannot run its own preconditions is not a build.
+**System package via apt.** Rejected for reasons that do not depend on whether
+sudo works. A distro package ships whichever version the archive carries, so
+the lab would compare against a server version nobody pinned — and this
+repository pins `psql 18.6` in `.db-versions` precisely so the two sides agree.
+It also installs system-wide state and needs root, which puts an environment
+change in front of every test run.
+
+On this machine it additionally cannot run at all, since `sudo -n` asks for a
+password. That is a fact about this machine only. Whether CI can apt-install is
+untested here, and stating it either way without evidence would have been the
+same mistake as the port claim above.
 
 **Docker.** Present and working, and remains a reasonable fallback. Rejected as
 the primary path because it puts a daemon, an image pull and container
