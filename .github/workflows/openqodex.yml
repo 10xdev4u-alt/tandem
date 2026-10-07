@@ -1,0 +1,46 @@
+name: openqodex
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  openqodex:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth 0: the scan diffs against the pull request's base commit,
+      # which a shallow checkout does not carry.
+      # SHA = the v4.4.0 release, which is what the moving v4 tag resolved to
+      # when this was written. Pinned because semgrep's own
+      # mutable-action-tag rule flags the tag: a tag can be repointed by
+      # whoever owns the action. Its suggested SHA is v4.1.0, so following the
+      # suggestion literally would have downgraded the action.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      # Pinned by SHA rather than the moving v0 tag: this is a third-party
+      # action, not actions/*, and it holds security-events: write. v0 and
+      # v0.8.1 both resolve to this commit.
+      #
+      # review stays "auto" and no ANTHROPIC_API_KEY is set on this step, so
+      # this run is the scanners half only. "required" would fail every job,
+      # and "auto" with a key later would start spending on reviews without
+      # anyone deciding to. See issue #108.
+      - uses: openqodex/openqodex@549d3301702a739d62bd7296e2b9c94ce17af1ce # v0.8.1
+        with:
+          version: "0.8.1"
+          review: auto
+          # Findings outside changed lines never count, so this arms against
+          # new code and leaves the existing tree alone. Below major stay
+          # annotations rather than a failed job.
+          block-on-severity: major
+          # A scan that could not run must not read as a green job. Without
+          # this a tool failure is only a warning, and a broken scan and a
+          # clean scan look identical in branch protection.
+          fail-on-tool-error: "true"
+          upload-sarif: "true"

@@ -1,0 +1,33 @@
+# openqodex configuration.
+#
+# In a pull request this is read from the base branch, not from the branch
+# under review, so a change cannot lower its own severity or widen its own
+# exclusions to get past the gate.
+
+version: 1
+
+review:
+  # Findings below this stay out of the report. The default is already minor;
+  # stated so the next reader does not have to look it up.
+  severity_threshold: minor
+  # Only findings on changed lines ever count toward the verdict, so this
+  # fails a pull request for problems it introduced and not for problems that
+  # were already here.
+  block_on_severity: major
+
+scanners:
+  disable:
+    # openqodex ships golangci-lint 2.12.2, built with Go 1.26, and runs it
+    # with GOTOOLCHAIN=local and GOPROXY=off. This repository declares
+    # `go 1.27` in go.mod, so the scanner cannot type-check the tree and would
+    # report a failure on every single run.
+    #
+    # Disabled rather than left permanently red, because a check that is
+    # always failing is a check nobody reads. Re-enable it when openqodex
+    # ships a golangci-lint built against Go 1.27 or newer; the reason above
+    # is what to check against first.
+    #
+    # This costs gosec, which golangci was carrying. Worth noting rather than
+    # quietly absorbing: security linting for Go is the one thing this
+    # scanner stack loses. `make check` runs vet and the tests, not gosec.
+    - golangci
