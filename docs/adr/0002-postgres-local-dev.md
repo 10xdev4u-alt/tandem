@@ -108,9 +108,16 @@ rather than according to the code.
 
 ## Consequences
 
-- Postgres tests own their lifecycle: start, use, stop. No shared server, no
-  port conflicts with anything preinstalled, no state left behind for the next
-  run.
+- Postgres tests own their lifecycle: start, use, stop. No shared server and no
+  state left behind for the next run.
+- **The port is not free of conflict, and an earlier version of this document
+  said otherwise.** `embedded-postgres` v1.34.0 defaults to `5432` and
+  `Start()` returns an error when that port is occupied. This box has no server
+  listening, which is why the spike passed; a developer who does have Postgres
+  running locally would fail to start the harness through no fault of their
+  own. The ADR picks a version and nothing else, so selecting a port is left to
+  #22, and "our own lifecycle means no conflict with preinstalled services" is
+  exactly the kind of claim that looks true on the machine that produced it.
 - First run downloads the server binary. It is a one-time cost and it needs
   network; a machine with no network cannot run the Postgres tests.
 - The client pin and the server pin are now two places holding one fact. If
