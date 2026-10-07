@@ -23,8 +23,21 @@ $ dpkg -l | grep postgresql
 $ apt-cache policy postgresql
 ```
 
-All empty. No server, no listener, no package, and on **this machine** no way to
-install one non-interactively:
+Nothing on the **default endpoint**, and no package: `pg_isready` answers no
+response for `/run/postgresql:5432`, nothing is listening on TCP 5432, and no
+`initdb`, `pg_ctl` or `postgres` binary is on the path.
+
+Narrow on purpose. Those two commands look at one port and one socket path, so
+they do not establish that no server exists anywhere on this machine — a
+Postgres on a non-default port, or one Docker had published elsewhere, would
+not have been seen and was never looked for. What is established, and all the
+decision needed, is that **the port the library would claim by default is
+free**: `embedded-postgres` defaults to 5432, so 5432 is the endpoint whose
+occupancy decides whether the spike could start at all. Claiming "no server"
+from a check of one port would have been the same widening as the sudo claim
+further down.
+
+And on **this machine** there is no way to install one non-interactively:
 
 ```
 $ sudo -n true
@@ -61,6 +74,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 )
@@ -88,6 +102,16 @@ func run() int {
 	// below would skip this and leave the child process unreleased.
 	defer pg.Stop()
 
+	// The query below reports the SERVER's version. Without this line, a psql
+	// of any version at all would print 18.6 and read as a match, and client
+	// and server would be two claims where only one had been measured.
+	ver, err := exec.Command("psql", "--version").CombinedOutput()
+	if err != nil {
+		fmt.Println("PSQL VERSION FAILED:", err, string(ver))
+		return 1
+	}
+	fmt.Println("PSQL CLIENT:", strings.TrimSpace(string(ver)))
+
 	// Verified through the pinned psql client rather than the library's own
 	// handshake. A library that reported success without a server would pass
 	// unnoticed otherwise, which is the whole reason for this line.
@@ -112,9 +136,14 @@ called `os.Exit(1)` on the psql failure path, which skips every deferred call
 and would have left the child process unreleased. It did not affect the numbers
 below, because psql succeeded and the deferred `Stop()` on the success path
 still ran — but a spike whose whole argument is "verify rather than assume"
-should not contain a resource leak on the path where verification fails. The first run substituted
-`embeddedpostgres.V18` for the version literal; that is the only difference
-between the two transcripts below.
+should not contain a resource leak on the path where verification fails.
+
+The two runs differ in two ways, not one. The first substituted
+`embeddedpostgres.V18` for the version literal, which is why it reports 18.3.
+It also predates the `psql --version` line just added above: the program that
+produced the 18.3 transcript never asked the client what it was, so that
+transcript carries no `PSQL CLIENT` line and is not evidence about the client
+at all.
 
 First run, using the library's `V18` constant:
 
@@ -139,16 +168,21 @@ entirely:
 Version(embeddedpostgres.PostgresVersion("18.6.0"))
 ```
 
-Second run:
+Second run, with the literal version and the client check:
 
 ```
+PSQL CLIENT: psql (PostgreSQL) 18.6
 PSQL OK: PostgreSQL 18.6 on x86_64-pc-linux-gnu, compiled by gcc
 (Ubuntu 7.5.0-3ubuntu1~18.04) 7.5.0, 64-bit|tandem
 SPIKE PASS
 ```
 
-Server 18.6, client 18.6, exit 0. Both sides now match the pin in
-`.db-versions`.
+Client 18.6, server 18.6, exit 0 — and both are now measured rather than
+asserted. The first line is the client answering for itself; the second is the
+server answering for itself. Before that line existed the program printed only
+the server's version, so "client 18.6, server 18.6" was one measurement
+presented as two, and a `psql` of any version would have produced the same
+output. Both now match the `psql 18.6` pin in `.db-versions`.
 
 ## Decision
 
