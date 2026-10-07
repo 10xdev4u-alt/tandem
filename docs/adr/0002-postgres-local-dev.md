@@ -66,6 +66,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	const port = uint32(54329)
 
 	pg := embeddedpostgres.NewDatabase(embeddedpostgres.DefaultConfig().
@@ -77,8 +81,11 @@ func main() {
 
 	if err := pg.Start(); err != nil {
 		fmt.Println("START FAILED:", err)
-		os.Exit(1)
+		return 1
 	}
+	// Registered only once the server is up, and returned to rather than exited
+	// from: os.Exit does not run deferred calls, so an os.Exit on the psql path
+	// below would skip this and leave the child process unreleased.
 	defer pg.Stop()
 
 	// Verified through the pinned psql client rather than the library's own
@@ -89,15 +96,23 @@ func main() {
 		"-tAc", "select version(), current_user;").CombinedOutput()
 	if err != nil {
 		fmt.Println("PSQL FAILED:", err, string(out))
-		os.Exit(1)
+		return 1
 	}
 	fmt.Println("PSQL OK:", string(out))
 	fmt.Println("SPIKE PASS")
+	return 0
 }
 ```
 
 Run with `go run .` in a module containing only this file and
-`github.com/fergusstrange/embedded-postgres`. The first run substituted
+`github.com/fergusstrange/embedded-postgres`.
+
+The `main`/`run` split is not decoration. The scratch program I actually ran
+called `os.Exit(1)` on the psql failure path, which skips every deferred call
+and would have left the child process unreleased. It did not affect the numbers
+below, because psql succeeded and the deferred `Stop()` on the success path
+still ran — but a spike whose whole argument is "verify rather than assume"
+should not contain a resource leak on the path where verification fails. The first run substituted
 `embeddedpostgres.V18` for the version literal; that is the only difference
 between the two transcripts below.
 
