@@ -28,6 +28,20 @@ func record(t *testing.T, ddl string, fn func(db *sqlitesession.DB)) []byte {
 	return cs
 }
 
+// requireRecorded fails loudly when a session captured nothing. It exists
+// because ApplyChangeset returns nil for an empty buffer, which is correct
+// no-op behaviour for the API: without this guard an empty changeset sails
+// through the apply and the row count underneath reports the symptom instead
+// of the cause, pointing the reader at the apply path when nothing was ever
+// recorded. That is how main reported "0 rows" once and sent the investigation
+// the wrong way.
+func requireRecorded(t *testing.T, cs []byte, after string) {
+	t.Helper()
+	if len(cs) == 0 {
+		t.Fatalf("session recorded nothing after %s: changeset is empty", after)
+	}
+}
+
 func countRows(t *testing.T, db *sqlitesession.DB, table string) int64 {
 	t.Helper()
 	n, err := db.QueryInt64("SELECT count(*) FROM " + table)
@@ -79,6 +93,7 @@ func TestChangesetAppliesToIdenticalReplica(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Changeset: %v", err)
 	}
+	requireRecorded(t, cs, "insert, update and delete")
 
 	dst := openDB(t, accountsDDL)
 	if err := dst.ApplyChangeset(cs); err != nil {
@@ -114,6 +129,7 @@ func TestInvertedChangesetUndoesTheOriginal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Changeset: %v", err)
 	}
+	requireRecorded(t, cs, "one insert")
 
 	dst := openDB(t, accountsDDL)
 	if err := dst.ApplyChangeset(cs); err != nil {
