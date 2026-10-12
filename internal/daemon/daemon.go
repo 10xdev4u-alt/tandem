@@ -4,7 +4,6 @@ package daemon
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"os"
@@ -12,9 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
-
 	"github.com/10xdev4u-alt/tandem/internal/config"
+	"github.com/10xdev4u-alt/tandem/internal/engine"
 	"github.com/10xdev4u-alt/tandem/internal/sqlitecheck"
 	"github.com/10xdev4u-alt/tandem/internal/version"
 )
@@ -70,6 +68,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	fmt.Fprintf(d.logger, "database: %s\n", d.cfg.Database.Path)
+
+	// These are printed after checkSession, which asserts each one against the
+	// file, so the line describes a database that has already been verified
+	// rather than settings that were merely requested.
+	opts := d.sqliteOptions()
+	fmt.Fprintf(d.logger,
+		"sqlite settings: page size %d, busy timeout %s, journal wal, foreign keys on\n",
+		opts.PageSize, opts.BusyTimeout)
+
 	fmt.Fprintln(d.logger, "ready")
 
 	<-ctx.Done()
@@ -82,11 +89,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 //
 // Opening the database here rather than later means a path that cannot be opened
 // is reported at startup, while the operator is still looking at the startup
-// output, instead of at the first write.
+// output, instead of at the first write. engine.OpenSQLite does the same for
+// the pragmas: a file that cannot be brought into WAL mode, or whose page size
+// contradicts the configuration, fails here instead of running with settings
+// nobody chose.
 func (d *Daemon) checkSession() (sqlitecheck.Status, error) {
-	db, err := sql.Open("sqlite3", d.cfg.Database.Path)
+	db, err := engine.OpenSQLite(d.cfg.Database.Path, d.sqliteOptions())
 	if err != nil {
-		return sqlitecheck.Status{}, fmt.Errorf("opening database %s: %w", d.cfg.Database.Path, err)
+		return sqlitecheck.Status{}, err
 	}
 	defer db.Close()
 
@@ -95,6 +105,17 @@ func (d *Daemon) checkSession() (sqlitecheck.Status, error) {
 		return sqlitecheck.Status{}, fmt.Errorf("checking sqlite build: %w", err)
 	}
 	return state, nil
+}
+
+// sqliteOptions maps configuration onto the settings the engine applies and
+// then reads back. Every value printed at startup has already been verified
+// against the file, so the log reports what the database is rather than what
+// was asked for.
+func (d *Daemon) sqliteOptions() engine.SQLiteOptions {
+	return engine.SQLiteOptions{
+		PageSize:    d.cfg.Database.PageSizeOrDefault(),
+		BusyTimeout: d.cfg.Database.BusyTimeout(),
+	}
 }
 
 func onOff(b bool) string {

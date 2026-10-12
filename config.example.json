@@ -1,6 +1,8 @@
 {
   "database": {
-    "path": "tandem.db"
+    "path": "tandem.db",
+    "page_size": 4096,
+    "busy_timeout_ms": 5000
   },
   "bridge": {
     "enabled": false,
