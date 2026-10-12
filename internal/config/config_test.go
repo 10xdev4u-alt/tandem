@@ -4,7 +4,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/10xdev4u-alt/tandem/internal/config"
 )
@@ -82,6 +84,96 @@ func TestRequireSessionDefaultsOn(t *testing.T) {
 	}
 	if !cfg.RequireSession {
 		t.Error("RequireSession defaulted to false; it must default to true")
+	}
+}
+
+// TestSQLiteDefaultsApplyWhenKeysAbsent pins the documented defaults: page
+// size 4096 and a five second lock wait, both applied when the keys are
+// missing rather than left as zero.
+func TestSQLiteDefaultsApplyWhenKeysAbsent(t *testing.T) {
+	cfg, err := config.Load(write(t, `{"database":{"path":"a.db"}}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Database.PageSizeOrDefault(); got != config.DefaultPageSize {
+		t.Errorf("PageSizeOrDefault() = %d, want %d", got, config.DefaultPageSize)
+	}
+	if got := cfg.Database.BusyTimeout(); got != config.DefaultBusyTimeout {
+		t.Errorf("BusyTimeout() = %s, want %s", got, config.DefaultBusyTimeout)
+	}
+}
+
+// TestZeroBusyTimeoutIsHonouredNotDefaulted is the reason the fields are
+// pointers. A plain int cannot tell an absent key from an explicit zero, and
+// zero here means "do not wait for the lock" while absent means "use the
+// default". Reading back the default would make the configuration say
+// something its author did not write.
+func TestZeroBusyTimeoutIsHonouredNotDefaulted(t *testing.T) {
+	cfg, err := config.Load(write(t, `{"database":{"path":"a.db","busy_timeout_ms":0}}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Database.BusyTimeout(); got != 0 {
+		t.Errorf("BusyTimeout() = %s, want 0 for an explicit zero", got)
+	}
+}
+
+func TestConfiguredSQLiteValuesAreUsed(t *testing.T) {
+	cfg, err := config.Load(write(t,
+		`{"database":{"path":"a.db","page_size":8192,"busy_timeout_ms":1234}}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Database.PageSizeOrDefault(); got != 8192 {
+		t.Errorf("PageSizeOrDefault() = %d, want 8192", got)
+	}
+	if got := cfg.Database.BusyTimeout(); got != 1234*time.Millisecond {
+		t.Errorf("BusyTimeout() = %s, want 1234ms", got)
+	}
+}
+
+func TestInvalidSQLiteValuesRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"page size not a power of two", `{"database":{"path":"a.db","page_size":5000}}`},
+		{"page size too small", `{"database":{"path":"a.db","page_size":256}}`},
+		{"page size too large", `{"database":{"path":"a.db","page_size":131072}}`},
+		{"negative busy timeout", `{"database":{"path":"a.db","busy_timeout_ms":-1}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := config.Load(write(t, tt.body))
+			if err == nil {
+				t.Fatal("Load accepted an out of range value")
+			}
+			if !errors.Is(err, config.ErrInvalidValue) {
+				t.Errorf("error = %v, want ErrInvalidValue", err)
+			}
+		})
+	}
+}
+
+// TestMissingAndInvalidReportedTogether is why Validate returns a joined
+// error. A config missing its path and carrying a bad page size must be fixed
+// in one restart, not discovered one failure at a time.
+func TestMissingAndInvalidReportedTogether(t *testing.T) {
+	_, err := config.Load(write(t, `{"database":{"page_size":5000}}`))
+	if err == nil {
+		t.Fatal("Load accepted a config with no database path and a bad page size")
+	}
+	if !errors.Is(err, config.ErrMissingKey) {
+		t.Errorf("error = %v, want ErrMissingKey also reported", err)
+	}
+	if !errors.Is(err, config.ErrInvalidValue) {
+		t.Errorf("error = %v, want ErrInvalidValue also reported", err)
+	}
+	if !strings.Contains(err.Error(), "database.path") {
+		t.Errorf("error = %v, want it to name database.path", err)
+	}
+	if !strings.Contains(err.Error(), "database.page_size") {
+		t.Errorf("error = %v, want it to name database.page_size", err)
 	}
 }
 
